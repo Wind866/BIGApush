@@ -56,19 +56,20 @@ def get_sector_fund_flow():
     try:
         url = "https://push2.eastmoney.com/api/qt/clist/get"
         params = {
-            "pn": 1, "pz": 10, "po": 1, "np": 1, "fltt": 2, "invt": 2,
+            "pn": 1, "pz": 20, "po": 1, "np": 1, "fltt": 2, "invt": 2,
             "fid": "f62", "fs": "m:90+t:2",
             "fields": "f3,f12,f14,f62"
         }
-        resp = requests.get(url, params=params, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, params=params, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         data = resp.json()
         if data.get("data") and data["data"].get("diff"):
             result = []
             for item in data["data"]["diff"]:
+                fund = item.get("f62", 0) / 100000000
                 result.append({
                     "name": item.get("f14", ""),
                     "pct": item.get("f3", 0),
-                    "fund": item.get("f62", 0) / 100000000  # 转换为亿
+                    "fund": fund
                 })
             return result
     except Exception:
@@ -101,18 +102,21 @@ def format_sector_message():
         lines.append("")
 
     # 资金流向
+    lines.append("💰 板块资金流向")
     fund_flow = get_sector_fund_flow()
     if fund_flow:
-        # 按资金流向排序，正数为流入，负数为流出
         sorted_flow = sorted(fund_flow, key=lambda x: x['fund'], reverse=True)
         inflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[:5] if s['fund'] > 0]
         outflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[-5:] if s['fund'] < 0]
-        lines.append("💰 板块资金流向")
         if inflow:
             lines.append(f"  净流入: {' | '.join(inflow)}")
         if outflow:
             lines.append(f"  净流出: {' | '.join(outflow)}")
-        lines.append("")
+        if not inflow and not outflow:
+            lines.append("  数据暂不可用")
+    else:
+        lines.append("  数据暂不可用（东方财富API受限）")
+    lines.append("")
 
     return "\n".join(lines)
 

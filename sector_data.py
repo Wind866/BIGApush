@@ -103,11 +103,15 @@ def format_sector_message():
     # 资金流向
     fund_flow = get_sector_fund_flow()
     if fund_flow:
-        inflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in fund_flow[:5]]
-        outflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in fund_flow[-5:]]
+        # 按资金流向排序，正数为流入，负数为流出
+        sorted_flow = sorted(fund_flow, key=lambda x: x['fund'], reverse=True)
+        inflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[:5] if s['fund'] > 0]
+        outflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[-5:] if s['fund'] < 0]
         lines.append("💰 板块资金流向")
-        lines.append(f"  净流入: {' | '.join(inflow)}")
-        lines.append(f"  净流出: {' | '.join(outflow)}")
+        if inflow:
+            lines.append(f"  净流入: {' | '.join(inflow)}")
+        if outflow:
+            lines.append(f"  净流出: {' | '.join(outflow)}")
         lines.append("")
 
     return "\n".join(lines)

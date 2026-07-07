@@ -1,0 +1,26 @@
+# 数据库文件
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/running/
+
+
+# 日志
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 临时文件
+test_*.py
+*.tmp
+.DS_Store
+Thumbs.db
+
+# 环境配置
+.env
+config/config.yaml

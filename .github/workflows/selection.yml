@@ -1,0 +1,41 @@
+name: 收盘选股
+
+on:
+  schedule:
+    - cron: '10 7 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-selection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Restore database cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: stock-db-${{ github.run_id }}
+          restore-keys: stock-db-
+      - name: Check database
+        id: check-db
+        run: |
+          if [ -f "data/stock_selection.db" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Initialize data (first run)
+        if: steps.check-db.outputs.exists == 'false'
+        run: python main.py init
+        timeout-minutes: 45
+      - name: Run selection and push
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: python main.py run
+        timeout-minutes: 30

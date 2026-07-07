@@ -1395,23 +1395,11 @@ def run_selection():
                         timeout=8, headers={'User-Agent': 'Mozilla/5.0'}
                     )
                     import re as _re, json as _json
-                    _sec_match = _re.search(r'=\s*(\{.*\})', _sec_resp.text, _re.DOTALL)
-                    if _sec_match:
-                        _sec_data = _json.loads(_sec_match.group(1))
-                        _sectors = []
-                        for _v in _sec_data.values():
-                            _parts = _v.split(',')
-                            if len(_parts) > 5:
-                                _sectors.append((_parts[1], float(_parts[4]) if _parts[4] else 0))
-                        _sectors.sort(key=lambda x: x[1], reverse=True)
-
-                        _up_sectors = [f"{n}({p:+.2f}%)" for n, p in _sectors[:5]]
-                        _dn_sectors = [f"{n}({p:+.2f}%)" for n, p in _sectors[-5:]]
-
-                        _lines.append("🔥 板块热力图")
-                        _lines.append(f"  🔴 领涨: {' | '.join(_up_sectors)}")
-                        _lines.append(f"  🟢 领跌: {' | '.join(_dn_sectors)}")
-                        _lines.append("")
+                    from sector_data import format_sector_message as _sector_msg
+                    _sector_text = _sector_msg()
+                    if _sector_text:
+                        _lines.append("━━━━━━━━━━━━━━━━━━━━")
+                        _lines.append(_sector_text)
                 except Exception:
                     pass
 

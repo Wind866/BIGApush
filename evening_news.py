@@ -5,7 +5,12 @@
 """
 import requests
 import os
+import sys
 from datetime import datetime
+
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sector_data import format_sector_message
 
 
 def get_index_data():
@@ -118,12 +123,13 @@ def main():
         lines.extend(idx_lines)
         lines.append("")
 
-    # 板块热力图
-    up_sectors, dn_sectors = get_sector_data()
-    if up_sectors:
-        lines.append("🔥 板块热力图")
-        lines.append(f"  🔴 领涨: {' | '.join(up_sectors)}")
-        lines.append(f"  🟢 领跌: {' | '.join(dn_sectors)}")
+    # 板块数据（行业+概念+资金流向）
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    sector_msg = format_sector_message()
+    if sector_msg:
+        lines.append(sector_msg)
+    else:
+        lines.append("板块数据暂不可用")
         lines.append("")
 
     # 晚间要闻

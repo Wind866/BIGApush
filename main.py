@@ -853,25 +853,11 @@ B1完美图形匹配:
                     # 2) 板块涨跌热力图
                     try:
                         import re as _re, json as _json
-                        _sec_resp = _req.get(
-                            'https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php',
-                            timeout=8, headers={'User-Agent': 'Mozilla/5.0'}
-                        )
-                        _sec_match = _re.search(r'=\s*(\{.*\})', _sec_resp.text, _re.DOTALL)
-                        if _sec_match:
-                            _sec_data = _json.loads(_sec_match.group(1))
-                            _sectors = []
-                            for _v in _sec_data.values():
-                                _parts = _v.split(',')
-                                if len(_parts) > 5:
-                                    _sectors.append((_parts[1], float(_parts[4]) if _parts[4] else 0))
-                            _sectors.sort(key=lambda x: x[1], reverse=True)
-                            _up_sectors = [f"{n}({p:+.2f}%)" for n, p in _sectors[:5]]
-                            _dn_sectors = [f"{n}({p:+.2f}%)" for n, p in _sectors[-5:]]
-                            lines.append("🔥 板块热力图")
-                            lines.append(f"  🔴 领涨: {' | '.join(_up_sectors)}")
-                            lines.append(f"  🟢 领跌: {' | '.join(_dn_sectors)}")
-                            lines.append("")
+                        from sector_data import format_sector_message as _sector_msg
+                        _sector_text = _sector_msg()
+                        if _sector_text:
+                            lines.append("━━━━━━━━━━━━━━━━━━━━")
+                            lines.append(_sector_text)
                     except Exception:
                         pass
 

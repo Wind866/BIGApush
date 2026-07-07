@@ -52,25 +52,27 @@ def get_concept_sectors():
 
 
 def get_sector_fund_flow():
-    """获取板块资金流向（东方财富）"""
+    """获取板块资金流向（新浪）"""
     try:
-        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_bk"
         params = {
-            "pn": 1, "pz": 20, "po": 1, "np": 1, "fltt": 2, "invt": 2,
-            "fid": "f62", "fs": "m:90+t:2",
-            "fields": "f3,f12,f14,f62"
+            "page": 1,
+            "num": 20,
+            "sort": "netamount",
+            "asc": 0,
+            "fenlei": 1
         }
-        resp = requests.get(url, params=params, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, params=params, timeout=8, headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://finance.sina.com.cn"
+        })
         data = resp.json()
-        if data.get("data") and data["data"].get("diff"):
+        if data and isinstance(data, list):
             result = []
-            for item in data["data"]["diff"]:
-                fund = item.get("f62", 0) / 100000000
-                result.append({
-                    "name": item.get("f14", ""),
-                    "pct": item.get("f3", 0),
-                    "fund": fund
-                })
+            for item in data:
+                name = item.get("name", "")
+                net = float(item.get("netamount", 0)) / 100000000  # 转换为亿
+                result.append({"name": name, "fund": net})
             return result
     except Exception:
         pass
@@ -106,16 +108,14 @@ def format_sector_message():
     fund_flow = get_sector_fund_flow()
     if fund_flow:
         sorted_flow = sorted(fund_flow, key=lambda x: x['fund'], reverse=True)
-        # 流入最多
         inflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[:5]]
-        # 流入最少（或流出）
         outflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[-5:]]
         if inflow:
-            lines.append(f"  流入最多: {' | '.join(inflow)}")
+            lines.append(f"  净流入: {' | '.join(inflow)}")
         if outflow:
-            lines.append(f"  流入最少: {' | '.join(outflow)}")
+            lines.append(f"  净流出: {' | '.join(outflow)}")
     else:
-        lines.append("  数据暂不可用（东方财富API受限）")
+        lines.append("  数据暂不可用")
     lines.append("")
 
     return "\n".join(lines)

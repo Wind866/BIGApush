@@ -106,14 +106,14 @@ def format_sector_message():
     fund_flow = get_sector_fund_flow()
     if fund_flow:
         sorted_flow = sorted(fund_flow, key=lambda x: x['fund'], reverse=True)
-        inflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[:5] if s['fund'] > 0]
-        outflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[-5:] if s['fund'] < 0]
+        # 流入最多
+        inflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[:5]]
+        # 流入最少（或流出）
+        outflow = [f"{s['name']}({s['fund']:+.2f}亿)" for s in sorted_flow[-5:]]
         if inflow:
-            lines.append(f"  净流入: {' | '.join(inflow)}")
+            lines.append(f"  流入最多: {' | '.join(inflow)}")
         if outflow:
-            lines.append(f"  净流出: {' | '.join(outflow)}")
-        if not inflow and not outflow:
-            lines.append("  数据暂不可用")
+            lines.append(f"  流入最少: {' | '.join(outflow)}")
     else:
         lines.append("  数据暂不可用（东方财富API受限）")
     lines.append("")

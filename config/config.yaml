@@ -6,18 +6,11 @@
 
 data_dir: data
 
-# 钉钉机器人配置
-# 1. 在钉钉群中添加自定义机器人
-# 2. 复制 webhook URL 和加签密钥
-# 3. 填入下方（去掉引号内的占位符）
-dingtalk:
-  webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN_HERE"
-  secret: "YOUR_SECRET_HERE"
 
 # 飞书机器人配置
 # 在飞书群中添加自定义机器人，复制 webhook URL
 feishu:
-  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/REMOVED-LEAKED-SECRET-2"
+  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/REMOVED-LEAKED-SECRET-1"
 
 # 定时任务配置
 schedule:
@@ -31,9 +24,9 @@ update:
 # 股票过滤配置
 filters:
   # 最小市值（亿元）
-  min_market_cap: 10
+  min_market_cap: 40
   # 最大市值（亿元）
-  max_market_cap: 10000
+  max_market_cap: 5000
   # 最小流通股本（亿股）
   min_float_shares: 1
   # 最大流通股本（亿股）

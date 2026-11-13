@@ -554,6 +554,21 @@ def emit_github_output(is_trading: bool) -> None:
     print(line)
 
 
+LATE_GRACE_MINUTES = 20          # 超过该延迟才提示
+INTRADAY_MAX_LATE_MINUTES = 90   # 盘中快照迟到超过该值：不推送，避免把收盘数据当盘中发出去
+
+
+def late_minutes(expect: str) -> int:
+    """EXPECT_HHMM（如 '1307'）与实际北京时间之差；未提供或非法返回 0。"""
+    expect = (expect or "").strip()
+    if len(expect) != 4 or not expect.isdigit():
+        return 0
+    now = now_bj()
+    planned = now.replace(hour=int(expect[:2]), minute=int(expect[2:]),
+                          second=0, microsecond=0)
+    return int((now - planned).total_seconds() // 60)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="盘中选股观察池（13:00）")
     ap.add_argument("--dry-run", action="store_true", help="本地试跑，不推送飞书")
@@ -568,6 +583,15 @@ def main() -> int:
         return 0
     if not ok:
         print("非交易日，跳过盘中选股与推送")
+        return 0
+
+    # 调度延迟守卫：GitHub cron 实测可能晚几小时触发，迟到太久的"盘中"数据没有参考价值
+    expect = os.environ.get("EXPECT_HHMM", "").strip()
+    late = late_minutes(expect)
+    if late >= LATE_GRACE_MINUTES:
+        print(f"⚠️ 计划 {expect[:2]}:{expect[2:]} 运行，实际晚了 {late} 分钟（GitHub 调度延迟）")
+    if late >= INTRADAY_MAX_LATE_MINUTES and not args.dry_run:
+        print(f"::warning::盘中快照迟到 {late} 分钟，已非盘中口径 → 跳过推送（看板/数据不受影响）")
         return 0
 
     rows, quote_ts, source, snap = fetch_market_snapshot()

@@ -916,7 +916,12 @@ B1完美图形匹配:
                 # 推送失败必须让 Actions 变红，否则「运行成功却没收到消息」很难排查
                 if not notifier.send_text("\n".join(lines)):
                     if not webhook_url:
-                        print("::warning::FEISHU_WEBHOOK 未配置，选股结果已生成但不会推送，请在仓库 Secrets 中配置")
+                        msg = "FEISHU_WEBHOOK 未配置，选股结果已生成但不会推送，请在仓库 Settings → Secrets 中配置"
+                        if os.environ.get("CI"):
+                            # CI 里没配 webhook 属于配置错误：必须让 Actions 变红，否则"绿了但没消息"最难发现
+                            print(f"::error::{msg}")
+                            sys.exit(1)
+                        print(f"::warning::{msg}")
                     else:
                         print("❌ 收盘选股飞书推送失败")
                         sys.exit(1)

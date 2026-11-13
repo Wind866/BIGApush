@@ -1,9 +1,12 @@
 name: 盘中选股
 
-# 北京时间 = UTC+8。13:00 盘中快照（周一至周五），节假日由脚本自动跳过。
+# 北京时间 = UTC+8。13:07 盘中快照（周一至周五），节假日由脚本自动跳过。
+# 分钟数避开 :00 / :30 —— 整点是 GitHub 调度器最拥堵的时刻。
+# GitHub 的 schedule 只保证"尽力而为"（实测可晚数小时），因此脚本带延迟守卫：
+# 迟到 ≥90 分钟即判定"已非盘中"，只算不推，避免把收盘数据当盘中发出去。
 on:
   schedule:
-    - cron: '0 5 * * 1-5'
+    - cron: '7 5 * * 1-5'
   workflow_dispatch:
     inputs:
       force:
@@ -40,6 +43,8 @@ jobs:
         if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          # 计划时刻，供脚本判断本次是否已经迟到（迟到 ≥90 分钟只算不推）
+          EXPECT_HHMM: '1307'
         run: python intraday_selection.py
 
       - name: 非交易日提示

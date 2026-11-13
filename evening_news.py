@@ -96,12 +96,26 @@ def main():
 
     # 未配置 webhook 时直接跳过，避免日志出现「推送成功」造成误导
     if not os.environ.get("FEISHU_WEBHOOK", "").strip():
-        print("::warning::FEISHU_WEBHOOK 未配置，跳过本次推送（请在仓库 Secrets 中配置）")
+        msg = "FEISHU_WEBHOOK 未配置，跳过本次推送（请在仓库 Secrets 中配置）"
+        if os.environ.get("CI"):
+            print(f"::error::{msg}")
+            sys.exit(1)
+        print(f"::warning::{msg}")
         return
 
     # 标题
     lines.append(f"🌙 晚间缅A ({now.strftime('%Y-%m-%d')})")
     lines.append("")
+
+    # 调度延迟标注：GitHub cron 可能晚几小时，晚间总结变成凌晨推送时要说清楚
+    expect = os.environ.get("EXPECT_HHMM", "").strip()
+    if len(expect) == 4 and expect.isdigit():
+        planned = now.replace(hour=int(expect[:2]), minute=int(expect[2:]),
+                              second=0, microsecond=0)
+        late = int((now - planned).total_seconds() // 60)
+        if late >= 60:
+            lines.append(f"⚠️ 定时任务延迟 {late} 分钟（GitHub 调度），以下为 {now:%H:%M} 时点数据")
+            lines.append("")
 
     # 今日大盘收盘
     lines.append("━━━━━━━━━━━━━━━━━━━━")

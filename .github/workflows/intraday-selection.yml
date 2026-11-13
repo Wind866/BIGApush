@@ -1,0 +1,58 @@
+name: 盘中选股
+
+# 北京时间 = UTC+8。13:00 盘中快照（周一至周五），节假日由脚本自动跳过。
+on:
+  schedule:
+    - cron: '0 5 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 非交易日也强制运行（调试用）
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intraday-selection
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  intraday:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 交易日预检
+        id: trading
+        run: python intraday_selection.py --check-trading-day
+
+      - name: 盘中选股并推送飞书
+        if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+        run: python intraday_selection.py
+
+      - name: 非交易日提示
+        if: steps.trading.outputs.is_trading != 'true' && inputs.force != true
+        run: echo "::notice::非交易日，已跳过盘中选股推送"
+
+      - name: 失败告警
+        if: failure()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then echo "未配置 FEISHU_WEBHOOK，跳过失败告警"; exit 0; fi
+          curl -sS -X POST "$FEISHU_WEBHOOK" -H "Content-Type: application/json" \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 盘中选股任务运行失败，请查看日志：$RUN_URL\"}}" \
+            >/dev/null || true

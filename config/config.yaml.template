@@ -3,22 +3,21 @@
 # ============================================
 # 使用说明：
 # 1. 复制此文件为 config.yaml
-# 2. 填入你的钉钉机器人配置
-# 3. 不要提交 config.yaml 到Git仓库（已加入.gitignore）
+# 2. 推荐用环境变量 FEISHU_WEBHOOK 配置机器人（GitHub Actions 用 Secrets）
+# 3. 不要提交 config.yaml 到 Git 仓库（已加入 .gitignore），更不要写入真实密钥
 
 data_dir: data
 
-# 钉钉机器人配置
-# 1. 在钉钉群中添加自定义机器人
-# 2. 复制 webhook URL 和加签密钥
-# 3. 填入下方（去掉引号内的占位符）
-dingtalk:
-  webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN_HERE"
-  secret: "YOUR_SECRET_HERE"
+# 飞书机器人配置
+# 留空即可：main.py 会优先读取环境变量 FEISHU_WEBHOOK。
+# 如确需本地填写，请确保 config.yaml 不会被提交（公开仓库会泄露 webhook）。
+feishu:
+  webhook_url: ""
 
-# 定时任务配置
+# 定时任务配置（仅本地运行参考；线上以 .github/workflows/*.yml 的 cron 为准）
+# 北京时间：盘中选股 13:00 / 收盘选股 15:30 / 早间新闻 08:30 / 晚间新闻 22:00
 schedule:
-  time: "17:00"  # 每日执行时间
+  time: "15:30"
 
 # 数据更新配置
 update:

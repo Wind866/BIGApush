@@ -8,13 +8,17 @@ data_dir: data
 
 
 # 飞书机器人配置
-# 在飞书群中添加自定义机器人，复制 webhook URL
+# ⚠️ 安全提示：请勿在此填写真实 webhook。公开仓库中的任何内容都会被爬虫抓取，
+#    拿到 webhook 的人可向你的群随意发消息。请改用环境变量 / GitHub Secrets：
+#      FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx
+#    本文件保留空值，main.py 会优先读取环境变量。
+#    若曾经提交过真实 webhook，请务必到飞书群「设置 → 群机器人」重置该机器人。
 feishu:
-  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/REMOVED-LEAKED-SECRET-1"
+  webhook_url: ""
 
-# 定时任务配置
+# 定时任务配置（仅本地 schedule 模式参考；GitHub Actions 以 workflow cron 为准）
 schedule:
-  time: "17:00"  # 每日执行时间
+  time: "15:30"  # 收盘选股时间（北京时间）
 
 # 数据更新配置
 update:

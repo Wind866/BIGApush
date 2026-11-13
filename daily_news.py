@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
 每日早间股市新闻推送
-每天早上8点运行，推送财经要闻和隔夜外盘
+每天 08:30（北京时间）运行，推送财经要闻和上个交易日大盘回顾
 """
 import requests
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+# GitHub Actions runner 默认 UTC，显式使用北京时间，保证标题与日志时间正确
+BJ_TZ = timezone(timedelta(hours=8))
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -94,22 +97,38 @@ def get_news(count=10):
 
 
 def send_feishu(msg):
-    """发送飞书消息"""
-    webhook = os.environ.get("FEISHU_WEBHOOK", "")
+    """发送飞书消息；网络异常与飞书返回错误必须显式失败，避免 Actions 假绿。"""
+    webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
     if not webhook:
-        print("FEISHU_WEBHOOK 未设置")
+        print("::warning::FEISHU_WEBHOOK 未配置，消息已生成但不会推送，请在仓库 Secrets 中配置")
+        print("（消息预览）" + msg[:200].replace("\n", " / "))
+        return True
+    try:
+        resp = requests.post(
+            webhook,
+            json={"msg_type": "text", "content": {"text": msg}},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        code = result.get("code", result.get("StatusCode"))
+        if code not in (0, None):
+            print(f"❌ 飞书返回错误：{result}")
+            return False
+        return True
+    except Exception as exc:
+        print(f"❌ 飞书推送异常：{type(exc).__name__} {exc}")
         return False
-    resp = requests.post(
-        webhook,
-        json={"msg_type": "text", "content": {"text": msg}},
-        timeout=10,
-    )
-    return resp.json().get("code") == 0
 
 
 def main():
-    now = datetime.now()
+    now = datetime.now(BJ_TZ)
     lines = []
+
+    # 未配置 webhook 时直接跳过，避免日志出现「推送成功」造成误导
+    if not os.environ.get("FEISHU_WEBHOOK", "").strip():
+        print("::warning::FEISHU_WEBHOOK 未配置，跳过本次推送（请在仓库 Secrets 中配置）")
+        return
 
     # 标题
     lines.append(f"☀️ 早安缅A ({now.strftime('%Y-%m-%d %A')})")
@@ -146,9 +165,10 @@ def main():
     # 发送
     msg = "\n".join(lines)
     if send_feishu(msg):
-        print(f"✅ 早间新闻推送成功 ({now.strftime('%H:%M:%S')})")
+        print(f"✅ 早间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
     else:
         print("❌ 推送失败")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

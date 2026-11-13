@@ -1,25 +1,45 @@
 name: Keep Alive
 
+# GitHub 只在仓库连续 60 天无任何活动时才禁用定时任务，每周一次足够。
+# 原来每天一次会产生大量 "chore: keep alive" 噪音提交，这里改为每周一
+# UTC 17:00（北京时间周二 01:00），并顺便裁剪日志，避免无限膨胀。
 on:
   schedule:
-    # 每天北京时间凌晨1点运行一次，保持仓库活跃
-    - cron: '0 17 * * *'
+    - cron: '0 17 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+
 jobs:
   keep-alive:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Touch file to keep repo active
-        run: echo "Keep alive at $(date)" >> .github/keep-alive.log
-      - name: Commit if changed
+
+      - name: 记录心跳并裁剪日志
         run: |
-          git config user.name "wei1104"
-          git config user.email "2728562635@qq.com"
+          echo "Keep alive at $(date '+%Y-%m-%d %H:%M:%S %Z')" >> .github/keep-alive.log
+          tail -n 60 .github/keep-alive.log > .github/keep-alive.log.tmp
+          mv .github/keep-alive.log.tmp .github/keep-alive.log
+
+      - name: 提交变更
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/keep-alive.log
-          git diff --staged --quiet || git commit -m "chore: keep alive"
-          git push
+          if git diff --staged --quiet; then
+            echo "无变更，跳过提交"
+          else
+            git commit -m "chore: keep alive $(date '+%Y-%m-%d')"
+            git pull --rebase origin main
+            git push
+          fi

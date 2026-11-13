@@ -1,41 +1,99 @@
 name: 收盘选股
 
+# 北京时间 = UTC+8。15:30 收盘定稿（周一至周五），节假日由交易日预检跳过。
+# GitHub Actions 定时任务偶有 5~15 分钟延迟，属正常现象。
 on:
   schedule:
-    - cron: '10 7 * * 1-5'
+    - cron: '30 7 * * 1-5'
   workflow_dispatch:
+    inputs:
+      skip_update:
+        description: 跳过全量数据更新（用缓存数据库快速跑一次）
+        type: boolean
+        default: false
+      force:
+        description: 非交易日也强制运行（调试用）
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selection
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
 
 jobs:
   run-selection:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-      - run: pip install -r requirements.txt
-      - name: Restore database cache
+
+      # 纯标准库，可在装依赖前运行；用行情时间戳识别节假日，避免 tushare 缺失时误跑
+      - name: 交易日预检
+        id: trading
+        run: python intraday_selection.py --check-trading-day
+
+      - name: 安装依赖
+        if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
+        run: pip install -r requirements.txt
+
+      - name: 恢复数据库缓存
+        if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
         uses: actions/cache@v4
         with:
-          path: data
-          key: stock-db-${{ github.run_id }}
-          restore-keys: stock-db-
-      - name: Check database
+          # 只缓存数据库文件，避免覆盖仓库内已跟踪的 SQL 脚本
+          path: |
+            data/stock_selection.db
+            data/stock_selection.db-shm
+            data/stock_selection.db-wal
+          key: stock-db-${{ runner.os }}-v1-${{ github.run_id }}
+          restore-keys: |
+            stock-db-${{ runner.os }}-v1-
+
+      - name: 检查数据库
         id: check-db
+        if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
         run: |
           if [ -f "data/stock_selection.db" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Initialize data (first run)
-        if: steps.check-db.outputs.exists == 'false'
+
+      - name: 初始化数据（首次运行）
+        if: (steps.trading.outputs.is_trading == 'true' || inputs.force == true) && steps.check-db.outputs.exists == 'false'
         run: python main.py init
         timeout-minutes: 45
-      - name: Run selection and push
+
+      - name: 运行收盘选股并推送
+        if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          SKIP_DATA_UPDATE: ${{ inputs.skip_update && '1' || '0' }}
         run: python main.py run
-        timeout-minutes: 30
+        timeout-minutes: 55
+
+      - name: 非交易日提示
+        if: steps.trading.outputs.is_trading != 'true' && inputs.force != true
+        run: echo "::notice::非交易日，已跳过收盘选股"
+
+      - name: 失败告警
+        if: failure()
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$FEISHU_WEBHOOK" ]; then echo "未配置 FEISHU_WEBHOOK，跳过失败告警"; exit 0; fi
+          curl -sS -X POST "$FEISHU_WEBHOOK" -H "Content-Type: application/json" \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 收盘选股任务运行失败，请查看日志：$RUN_URL\"}}" \
+            >/dev/null || true

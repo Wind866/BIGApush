@@ -98,15 +98,24 @@ class QuantSystem:
         print("\n✓ 数据初始化完成")
 
     def _smart_update(self, max_stocks=None, check_latest=True):
-        """智能更新：3点前不更新，检查每只股票是否有当天数据"""
-        from datetime import datetime
+        """智能更新：收盘前不更新，检查每只股票是否有当天数据（按北京时间）"""
+        from datetime import datetime, timedelta, timezone
         import pandas as pd
 
-        today = datetime.now().date()
-        current_time = datetime.now().time()
+        # 显式使用北京时间：GitHub Actions runner 默认是 UTC，若直接用 datetime.now()，
+        # 15:30 北京时间会被当成 07:30「尚未收盘」，导致每天都跳过数据更新、
+        # 选股永远基于首次初始化的旧数据。
+        bj_now = datetime.now(timezone(timedelta(hours=8)))
+        today = bj_now.date()
+        current_time = bj_now.time()
         market_close_time = datetime.strptime("15:00", "%H:%M").time()
 
-        # 3点前：不更新，使用旧数据
+        # 手动触发时可跳过耗时的全量增量更新（用缓存数据库快速验证推送链路）
+        if os.environ.get("SKIP_DATA_UPDATE") == "1":
+            print("\n⏭️ 已设置 SKIP_DATA_UPDATE=1，跳过数据更新（使用缓存数据库）")
+            return
+
+        # 收盘前：不更新，使用旧数据
         if current_time < market_close_time:
             print("\n⏰ 当前时间尚未收盘 (15:00)")
             print("  使用本地已有数据，跳过网络更新")
@@ -904,7 +913,15 @@ B1完美图形匹配:
                     print(f"  ⚠️ 获取大盘数据失败: {_idx_err}")
 
                 lines.insert(1, f"共 {total} 只股票入选")
-                notifier.send_text("\n".join(lines))
+                # 推送失败必须让 Actions 变红，否则「运行成功却没收到消息」很难排查
+                if not notifier.send_text("\n".join(lines)):
+                    if not webhook_url:
+                        print("::warning::FEISHU_WEBHOOK 未配置，选股结果已生成但不会推送，请在仓库 Secrets 中配置")
+                    else:
+                        print("❌ 收盘选股飞书推送失败")
+                        sys.exit(1)
+                else:
+                    print("✅ 收盘选股飞书推送成功")
     
     elif args.command == 'web':
         # 启动Web服务器

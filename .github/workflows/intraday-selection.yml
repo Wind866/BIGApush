@@ -45,7 +45,8 @@ jobs:
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           # 计划时刻，供脚本判断本次是否已经迟到（迟到 ≥90 分钟只算不推）
-          EXPECT_HHMM: '1313'
+          # 仅 schedule 触发时注入：手动 dispatch 是"我现在就要结果"，不该被当成迟到而静默跳过
+          EXPECT_HHMM: "${{ github.event_name == 'schedule' && '1313' || '' }}"
         run: python intraday_selection.py
 
       - name: 非交易日提示

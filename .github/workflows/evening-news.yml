@@ -35,7 +35,8 @@ jobs:
       - name: 推送晚间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          EXPECT_HHMM: '2213'
+          # 仅 schedule 触发时注入，手动 dispatch 不该在消息里标"延迟 N 分钟"
+          EXPECT_HHMM: "${{ github.event_name == 'schedule' && '2213' || '' }}"
         run: python evening_news.py
 
       - name: 失败告警

@@ -152,15 +152,59 @@ python main.py run                       # 收盘选股并推送
 python intraday_selection.py --dry-run   # 盘中选股（不推送）
 python daily_news.py                     # 早间新闻
 python evening_news.py                   # 晚间新闻
+python check_sources.py                  # 数据源健康自检（纯标准库）
+python check_sources.py --markdown       # 生成可贴进 CI Summary 的体检报告
+python run_scheduled.py --list           # 本地定时兜底（Actions 不可用时）
 python main.py web                       # 启动 Web 界面
 ```
 
-## 数据来源
+## 数据源与容灾
 
-- 盘中实时行情 / 主力资金：东方财富（按成交单笔金额推断的统计量，非席位真实资金）
-- 指数行情：腾讯财经
-- 板块数据 / 资金流向 / 财经新闻：新浪财经
-- 历史 K 线：AKShare / 东方财富
+所有实时取数统一走 `utils/biga_sources.py` + `utils/market_sources.py`
+（与 [limit-up-relay](https://github.com/Wind866/limit-up-relay) 同源，纯标准库、
+零新增依赖）。单家供应商被限流、改字段或下线时自动切到下一层，不会再让整条
+流水线只剩「空消息」或历史假数据。
+
+| 链路 | 主源 | 备用源（按顺序） |
+|------|------|------------------|
+| 盘中强势股池 | 东财 `clist` 多域名（含主力/超大单/行业/量比） | 新浪全市场涨幅榜 → 同花顺涨停池 |
+| 备用池字段补齐 | 东财 `ulist.np` 多域名（可恢复完整同口径） | 腾讯行情（量比/换手/流通市值）→ 新浪资金流（口径不同） |
+| 交易日判断 | 东财指数时间戳（多域名） | 腾讯指数行情时间戳 |
+| 早/晚新闻要闻 | 新浪滚动 2516 | 同花顺快讯 → 新浪 2515 → 新浪 2517 → 同花顺次页 |
+| 大盘指数 | 腾讯批量行情 | 新浪指数 → 东财 `ulist.np` 多域名 |
+| 行业/概念板块 | 新浪行业 / 概念 | 东财板块榜（多域名） |
+| 收盘选股实时行情 | 腾讯 `qt.gtimg.cn` | `sqt.gtimg.cn` → `http://qt.gtimg.cn`（同口径三域名） |
+| 历史 K 线 | AKShare / 东财 / TickFlow | 腾讯 K 线（原有链路保持不变） |
+
+同供应商内的冗余：东财 `push2` 有 `push2 / 82.push2 / push2delay` 三个域名，
+`push2ex` 另有 http 降级；实测某一域名被限流时换域名即可恢复。
+
+**质量分级与口径红线**
+
+| 质量 | 含义 | 评分处理 |
+|------|------|----------|
+| `full` | 东财完整口径，字段齐全 | 七因子含主力资金、超大单、板块共振，可与历史比较 |
+| `partial` | 备用源补齐部分字段 | 量价口径；行业字段不可用时跳过板块共振 |
+| `minimal` | 仅量价 | 量价口径，分数仅用于当日内部排序 |
+
+- 任何缺失字段一律为 `None`，**绝不用 0 或猜测值冒充真实行情**；
+- 只有东财口径的资金参与评分。备用源（新浪）补到的资金数据**仅作展示参考**，
+  卡片会标注「口径不等价、未计入评分、不可与历史比较」；
+- 主力资金是按成交单笔金额推断的统计量，不是交易所席位真实资金。
+
+**健康自检与故障演练**
+
+```bash
+python check_sources.py                 # 逐项探测 18 个接口，按链路汇总
+python check_sources.py --markdown      # Markdown 报告（CI Step Summary 用）
+BIGA_SOURCE_EASTMONEY=0 python intraday_selection.py --dry-run   # 模拟东财全挂
+BIGA_SOURCE_EASTMONEY=0 BIGA_SOURCE_SINA=0 python check_sources.py  # 多级演练
+```
+
+开关在 `config/multi_source.json`（注意：`config/data_sources.json` 是原仓库
+`data_fetcher.py` 的供应商优先级配置，两者互不干扰）；环境变量
+`BIGA_SOURCE_EASTMONEY / SINA / THS / TENCENT = 0` 可临时覆盖。
+每周一 09:00 的「数据源健康自检」工作流会把报告写进 Run Summary。
 
 ## 项目结构
 
@@ -170,16 +214,20 @@ python main.py web                       # 启动 Web 界面
 ├── intraday_selection.py    # 盘中选股（独立、纯标准库）
 ├── daily_news.py            # 早间新闻
 ├── evening_news.py          # 晚间新闻
+├── check_sources.py         # 数据源健康自检（只读、纯标准库）
+├── run_scheduled.py         # 本地定时兜底（不依赖 GitHub Actions）
 ├── simple_analyzer.py       # 买入建议分析
-├── sector_data.py           # 板块数据获取
+├── sector_data.py           # 板块数据获取（新浪 → 东财降级）
 ├── web_server.py            # Web 服务器
-├── config/                  # 配置文件
+├── config/                  # 配置文件（含 multi_source.json）
 ├── strategy/                # 15 种选股策略
 ├── trading/                 # 交易 / 回测相关
 ├── utils/                   # 工具函数
+│   ├── biga_sources.py      # 多源接入层（本项目链路映射）
+│   └── market_sources.py    # 多源容灾底座（与 limit-up-relay 同源）
 ├── web/                     # Web 前端
 ├── data/                    # 数据文件（db 不上传）
-└── .github/workflows/       # 5 条 GitHub Actions 流水线
+└── .github/workflows/       # 6 条 GitHub Actions 流水线
 ```
 
 ## GitHub Actions 流水线
@@ -191,11 +239,41 @@ python main.py web                       # 启动 Web 界面
 | `morning-news.yml` | 早间新闻 | 每天 08:30 |
 | `evening-news.yml` | 晚间新闻 | 每天 22:00 |
 | `keep-alive.yml` | 保持仓库活跃 | 每周二 01:00 |
+| `check-sources.yml` | 数据源健康自检（只读） | 每周一 09:00，也可手动运行 |
 
 所有流水线都配置了最小权限 `permissions: contents: read`、
 `concurrency` 防重复运行、`TZ: Asia/Shanghai` 与失败告警。
 选股类任务在装依赖前先用纯标准库脚本做交易日预检，节假日直接跳过，
 不会白白消耗 Actions 额度或推送空消息。
+
+## GitHub Actions 被停用时的本地兜底
+
+如果仓库页面出现红字 **"GitHub Actions is currently disabled for this
+repository. Please reach out to GitHub Support for assistance."**，说明是
+GitHub 平台侧的禁用（常见于风控/滥用检测或额度限制），**不是 workflow 写错，
+也无法在 Settings → Actions 里自行重新打开**。可参考下面两条路径：
+
+1. 打开 `Settings → Actions → General` 与 `Settings → Billing and plans` 确认，
+   检查账号绑定邮箱有无 GitHub 通知，然后到 <https://support.github.com/request>
+   提交工单申请复核（附仓库地址与完整报错）。社区反馈这类限制有时无法解除。
+2. 若短期无法恢复，把定时任务移到本机/服务器，`run_scheduled.py` 会按同一张
+   时间表分发，飞书 Webhook 仍从环境变量 `FEISHU_WEBHOOK` 读取：
+
+```bash
+# 一次性确认时间表 / 当前状态
+python run_scheduled.py --list
+python run_scheduled.py --status
+
+# Linux：每 10 分钟调用一次（脚本自己判断该不该跑、同一时点当天只跑一次）
+*/10 * * * * cd /path/to/BIGApush && /usr/bin/python3 run_scheduled.py >> data/scheduler.log 2>&1
+```
+
+Windows 用「任务计划程序」新建任务：程序 `python.exe`、参数 `run_scheduled.py`、
+起始位置填仓库根目录，触发器设为每天每 10 分钟重复。
+也可以把代码推到一个新建的仓库，在 Actions 恢复正常后重新启用 6 条流水线。
+
+> 注：`keep-alive` 的自动提交是常见的风控触发点之一。若准备申诉，建议先停用
+> 该工作流（Settings → Actions → 对应 workflow → Disable），或删除后改用本地兜底。
 
 ## 常见问题
 
@@ -207,6 +285,9 @@ python main.py web                       # 启动 Web 界面
 | 节假日仍收到推送 | 交易日预检依赖东方财富行情时间戳；接口临时不可用时按周末规则放行，可手动禁用当天任务 |
 | 选股结果几天不变 | 旧版本 UTC 时区 bug 导致跳过数据更新；更新到本版本后按 15:30 正常增量更新 |
 | 手动重跑旧失败记录 | 请点 **Run workflow** 而不是失败运行里的 Re-run，后者会沿用旧提交时的 workflow 定义 |
+| Actions 页显示 `GitHub Actions is currently disabled for this repository` | 平台侧禁用，不是配置错误，需联系 GitHub Support 复核；见上一节的本地兜底方案 |
+| 卡片出现「量价口径 / 资金仅作参考」 | 东财主接口被限流，容灾链已自动切到新浪/腾讯/同花顺；可跑 `python check_sources.py` 查看具体哪个源挂了 |
+| 降级当天的分数和历史对不上 | 设计如此：备用源资金口径与东财不等价，不参与评分，分数只用于当日内部排序 |
 
 ## 参考项目
 

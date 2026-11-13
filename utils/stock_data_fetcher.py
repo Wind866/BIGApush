@@ -16,6 +16,33 @@ from urllib3.util.retry import Retry
 # 配置日志
 logger = logging.getLogger(__name__)
 
+
+# 腾讯证券行情：三个等价域名，任一可用即可（与 limit-up-relay 同一套容灾思路）
+TENCENT_QUOTE_HOSTS = ("https://qt.gtimg.cn", "https://sqt.gtimg.cn",
+                       "http://qt.gtimg.cn")
+
+
+def tencent_quote_urls(query: str):
+    """把查询串展开成多个等价接口地址。"""
+    return [f"{host}/q={query}" for host in TENCENT_QUOTE_HOSTS]
+
+
+def requests_get_with_fallback(urls, **kwargs):
+    """按顺序尝试等价接口，返回第一个非空 200 响应；全部失败才抛异常。
+
+    只用于腾讯实时行情（同一数据口径），不用于 K 线 / TickFlow 等不同接口。
+    """
+    last = None
+    for url in urls:
+        try:
+            resp = requests.get(url, **kwargs)
+            if resp is not None and resp.status_code == 200 and (resp.text or "").strip():
+                return resp
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+    raise last or RuntimeError("腾讯行情全部域名不可用")
+
+
 # TickFlow 免费 API 配置
 TICKFLOW_FREE_API = "https://free-api.tickflow.org"
 TICKFLOW_BATCH_MAX = 100   # 单次批量查询最大股票数（TickFlow API限制）
@@ -236,10 +263,10 @@ class StockDataFetcher:
                     continue
                 
                 query_codes = ','.join(query_codes_list)
-                url = f"https://qt.gtimg.cn/q={query_codes}"
+                urls = tencent_quote_urls(query_codes)
                 
                 try:
-                    resp = requests.get(url, timeout=30, headers={
+                    resp = requests_get_with_fallback(urls, timeout=30, headers={
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     })
                     
@@ -456,8 +483,8 @@ class StockDataFetcher:
                 query_code = f"sz{stock_code}"
             
             # 调用腾讯财经接口
-            url = f"https://qt.gtimg.cn/q={query_code}"
-            resp = requests.get(url, timeout=10, headers={
+            urls = tencent_quote_urls(query_code)
+            resp = requests_get_with_fallback(urls, timeout=10, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             
@@ -518,10 +545,10 @@ class StockDataFetcher:
             
             # 拼接为逗号分隔的查询字符串
             query_str = ','.join(query_list)
-            url = f"https://qt.gtimg.cn/q={query_str}"
+            urls = tencent_quote_urls(query_str)
             
             try:
-                resp = requests.get(url, timeout=15, headers={
+                resp = requests_get_with_fallback(urls, timeout=15, headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 # 腾讯接口返回GBK编码
@@ -576,8 +603,8 @@ class StockDataFetcher:
                 query_code = f"sz{stock_code}"
             
             # 调用腾讯财经接口
-            url = f"https://qt.gtimg.cn/q={query_code}"
-            resp = requests.get(url, timeout=10, headers={
+            urls = tencent_quote_urls(query_code)
+            resp = requests_get_with_fallback(urls, timeout=10, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             
@@ -620,8 +647,8 @@ class StockDataFetcher:
                     else:
                         query_codes.append(f"sz{code}")
                 
-                url = f"https://qt.gtimg.cn/q={','.join(query_codes)}"
-                resp = requests.get(url, timeout=30, headers={
+                urls = tencent_quote_urls(','.join(query_codes))
+                resp = requests_get_with_fallback(urls, timeout=30, headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 

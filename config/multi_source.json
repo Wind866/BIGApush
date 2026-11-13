@@ -1,0 +1,12 @@
+{
+  "_note": "多源容灾开关。设为 false 可临时停用某个供应商；环境变量 BIGA_SOURCE_EASTMONEY=0 等可覆盖此处配置。体检请运行 python check_sources.py",
+  "timeout_seconds": 8,
+  "max_retries": 2,
+  "eastmoney": true,
+  "eastmoney_clist": true,
+  "ths": true,
+  "sina": true,
+  "tencent": true,
+  "sina_flow_backfill": true,
+  "news": true
+}

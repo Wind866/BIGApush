@@ -14,34 +14,18 @@ BJ_TZ = timezone(timedelta(hours=8))
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sector_data import format_sector_message
+from utils import biga_sources as bs
 
 
 def get_index_data():
-    """获取主要指数行情"""
-    lines = []
-    index_codes = [
-        ("sh000001", "上证指数"),
-        ("sz399001", "深证成指"),
-        ("sz399006", "创业板指"),
-        ("sh000688", "科创50"),
-    ]
-    for code, name in index_codes:
-        try:
-            resp = requests.get(
-                f"https://qt.gtimg.cn/q={code}",
-                timeout=5,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            data = resp.text.split("~")
-            if len(data) > 45:
-                price = data[3]
-                pct = data[32]
-                vol = float(data[37]) / 10000
-                emoji = "🔴" if float(pct) > 0 else "🟢" if float(pct) < 0 else "⚪"
-                lines.append(f"  {emoji} {name}: {price} ({pct}%) {vol:.0f}亿")
-        except Exception:
-            pass
-    return lines
+    """多源指数行情：腾讯批量 → 新浪 → 东财多域名（见 utils/biga_sources.py）。"""
+    try:
+        lines, label = bs.fetch_index_lines()
+        print(f"[数据源] 指数行情：{label}")
+        return lines
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ 全部指数数据源不可用：{type(exc).__name__} {exc}")
+        return []
 
 
 def get_sector_data():
@@ -72,28 +56,14 @@ def get_sector_data():
 
 
 def get_news(count=10):
-    """获取财经要闻"""
-    lines = []
+    """多源财经要闻：新浪滚动 → 同花顺快讯 → 新浪 RSS → 新浪备用栏目。"""
     try:
-        resp = requests.get(
-            "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2516&k=&num=15&page=1",
-            timeout=8,
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://finance.sina.com.cn",
-            },
-        )
-        news_list = resp.json().get("result", {}).get("data", [])
-        for n in news_list[:count]:
-            title = n.get("title", "")
-            intro = n.get("intro", "")
-            if title:
-                lines.append(f"  • {title}")
-                if intro:
-                    lines.append(f"    {intro}")
-    except Exception:
-        pass
-    return lines
+        lines, label = bs.fetch_news(count)
+        print(f"[数据源] 财经要闻：{label}")
+        return lines
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ 全部新闻数据源不可用：{type(exc).__name__} {exc}")
+        return []
 
 
 def send_feishu(msg):

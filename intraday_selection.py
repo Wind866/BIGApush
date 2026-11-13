@@ -28,35 +28,19 @@ import argparse
 import json
 import os
 import sys
-import time
-import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 BJ_TZ = timezone(timedelta(hours=8))
-UA = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://quote.eastmoney.com/",
-    "Accept": "application/json, text/plain, */*",
-}
-UT = "fa5fd1943c7b386f172d6893dbfba10b"
-CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
-INDEX_URL = "https://push2.eastmoney.com/api/qt/stock/get"
-SINA_URL = (
-    "https://vip.stock.finance.sina.com.cn/quotes_service/api/"
-    "json_v2.php/Market_Center.getHQNodeData"
-)
-# 沪深主板 + 创业板 + 科创板（排除北交所）
-MARKET_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-FIELDS = (
-    "f12,f14,f2,f3,f6,f8,f10,f20,f21,f62,f184,"
-    "f66,f69,f72,f75,f100,f124"
-)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import biga_sources as bs  # noqa: E402  多源容灾层（东财/同花顺/新浪/腾讯）
+
+MIN_PCT = 3.0        # 只扫描涨幅 >= 3% 的强势股
+SCAN_FLOOR = 2.0     # 分页扫描到涨幅低于该值即停止
+MAX_PAGES = 20       # 上限 2000 只，防止极端行情下请求过多
+TOP_N = 10           # 卡片展示数量
 
 # 评分权重（合计 1.0，可按需调整）
 WEIGHTS = {
@@ -75,10 +59,6 @@ WEIGHTS_NO_FUND = {
     "turn": 0.15, "sector": 0.0, "cap": 0.28,
 }
 
-MIN_PCT = 3.0        # 只扫描涨幅 >= 3% 的强势股
-SCAN_FLOOR = 2.0     # 分页扫描到涨幅低于该值即停止
-MAX_PAGES = 20       # 上限 2000 只，防止极端行情下请求过多
-TOP_N = 10           # 卡片展示数量
 
 
 def now_bj() -> datetime:
@@ -98,37 +78,18 @@ def _num(v: Any, default: float | None = None) -> float | None:
     return f
 
 
-def _get_json(url: str, params: dict, retries: int = 3, timeout: int = 12):
-    full = url + "?" + urllib.parse.urlencode(params, safe="+:,")
-    last: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(full, headers=UA)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001 - 网络异常统一重试
-            last = exc
-            if attempt < retries:
-                time.sleep(0.6 * (attempt + 1))
-    raise RuntimeError(f"接口请求失败: {type(last).__name__} {last}")
-
-
 def fetch_index_timestamp() -> int:
-    """取上证指数最新行情时间戳，用于精确判断交易日。"""
-    data = _get_json(INDEX_URL, {
-        "secid": "1.000001", "ut": UT, "fields": "f43,f86",
-    })
-    ts = (data.get("data") or {}).get("f86")
-    if not ts:
-        raise RuntimeError("指数行情时间戳为空")
-    return int(ts)
+    """多源交易日行情时点：东财多域名 → 腾讯指数时间戳。"""
+    ts, label = bs.fetch_index_timestamp()
+    print(f"[交易日] 行情时点来源：{label}")
+    return ts
 
 
 def check_trading_day() -> tuple[bool, str]:
     """
     返回 (是否交易日, 说明)。
     先用周末规则快速排除，再用行情时间戳的北京日期比对识别法定节假日。
-    接口不可用时保守放行（只按周末规则），避免网络波动导致漏跑。
+    指数日历全部失效时保守放行（只按周末规则），避免网络波动导致漏跑。
     """
     bj = now_bj()
     if bj.weekday() >= 5:
@@ -140,96 +101,18 @@ def check_trading_day() -> tuple[bool, str]:
             return False, f"行情最新日期 {quote_day}，今日 {bj.date()} 非交易日（节假日或休市）"
         return True, f"行情时间戳 {datetime.fromtimestamp(ts, BJ_TZ):%Y-%m-%d %H:%M:%S} 为当日"
     except Exception as exc:  # noqa: BLE001
-        return True, f"交易日历接口不可用（{type(exc).__name__}），按周末规则放行"
+        return True, f"交易日历接口全部不可用（{type(exc).__name__}），按周末规则放行"
 
 
-def fetch_strong_stocks_sina() -> tuple[list[dict], int]:
-    """
-    降级数据源：新浪财经全市场涨幅榜。
-    东财 clist 接口偶发限流（RemoteDisconnected）时启用，保证 13:00 仍有卡片。
-    新浪不提供主力资金、量比与行业，因此映射为统一字段时留空，
-    由 build_pool 切换成「纯量价」评分口径。
-    """
-    rows: list[dict] = []
-    ts = int(now_bj().timestamp())
-    for page in range(1, MAX_PAGES + 1):
-        try:
-            data = _get_json(SINA_URL, {
-                "page": page, "num": 100, "sort": "changepercent",
-                "asc": 0, "node": "hs_a",
-            }, retries=1, timeout=10)
-        except Exception as exc:  # noqa: BLE001
-            if page == 1:
-                raise RuntimeError(f"主源与备用源均不可用: {exc}") from exc
-            print(f"⚠️ 新浪第 {page} 页拉取失败，使用已获取的 {len(rows)} 只继续")
-            break
-        if not isinstance(data, list) or not data:
-            break
-        for d in data:
-            code = str(d.get("code") or "").strip()
-            if not code:
-                continue
-            rows.append({
-                "f12": code,
-                "f14": str(d.get("name") or "").strip(),
-                "f2": _num(d.get("trade"), 0),
-                "f3": _num(d.get("changepercent"), 0),
-                "f6": _num(d.get("amount"), 0),
-                "f8": _num(d.get("turnoverratio"), 0),
-                "f10": 0.0,          # 量比缺失
-                "f20": (_num(d.get("mktcap"), 0) or 0) * 1e4,   # 万元 -> 元
-                "f21": (_num(d.get("nmc"), 0) or 0) * 1e4,
-                "f62": None, "f184": None, "f66": None, "f69": None,
-                "f100": "其他",      # 行业缺失
-                "f124": ts,
-            })
-        tail = _num(data[-1].get("changepercent"), 0) or 0
-        if tail < SCAN_FLOOR or len(data) < 100:
-            break
-        time.sleep(0.25)
-    return rows, ts
+def fetch_market_snapshot():
+    """多源强势股快照，返回 (rows, 行情时点, 评分口径, Snapshot)。
 
-
-def fetch_market_snapshot() -> tuple[list[dict], int, str]:
+    降级顺序：东财 clist 多域名 → 新浪涨幅榜 → 同花顺涨停池，
+    备用池再依次用东财 ulist.np / 腾讯行情 / 新浪资金流补齐字段。
+    只有东财口径参与资金评分，避免跨口径分数被误对比。
     """
-    按涨幅降序分页抓取强势股，返回 (股票列表, 行情时间戳, 数据源)。
-    因为按涨幅排序，涨幅 >= SCAN_FLOOR 的股票一定在前面，无需扫全市场 5500+ 只。
-    东财主源失败时自动降级到新浪（量价口径）。
-    """
-    rows: list[dict] = []
-    latest_ts = 0
-    for page in range(1, MAX_PAGES + 1):
-        try:
-            data = _get_json(CLIST_URL, {
-                "pn": page, "pz": 100, "po": 1, "np": 1,
-                "fltt": 2, "invt": 2, "ut": UT, "fid": "f3",
-                "fs": MARKET_FS, "fields": FIELDS,
-            })
-        except Exception as exc:  # noqa: BLE001
-            if page == 1:
-                print(f"⚠️ 东方财富行情接口不可用（{type(exc).__name__}），切换新浪量价降级源")
-                sina_rows, sina_ts = fetch_strong_stocks_sina()
-                return sina_rows, sina_ts, "sina"
-            print(f"⚠️ 东财第 {page} 页拉取失败，使用已获取的 {len(rows)} 只继续")
-            break
-        batch = ((data.get("data") or {}).get("diff") or [])
-        if not batch:
-            break
-        if isinstance(batch, dict):  # 某些返回结构是 dict
-            batch = list(batch.values())
-        rows.extend(batch)
-        for r in batch:
-            ts = int(_num(r.get("f124"), 0) or 0)
-            if ts > latest_ts:
-                latest_ts = ts
-        tail = _num(batch[-1].get("f3"), 0) or 0
-        if tail < SCAN_FLOOR or len(batch) < 100:
-            break
-        time.sleep(0.2)
-    if not rows:
-        sina_rows, sina_ts = fetch_strong_stocks_sina()
-        return sina_rows, sina_ts, "sina"
-    return rows, latest_ts or int(now_bj().timestamp()), "eastmoney"
+    snap = bs.fetch_snapshot(scan_floor=SCAN_FLOOR, max_pages=MAX_PAGES)
+    return snap.rows, snap.quote_ts, snap.source, snap
 
 
 def is_limit_up(code: str, pct: float, name: str) -> bool:
@@ -300,11 +183,22 @@ def _score_cap(float_mv_yi: float) -> float:
     return 52.0
 
 
-def build_pool(rows: list[dict], source: str = "eastmoney") -> tuple[list[dict], dict]:
+SOURCE_LABELS = {
+    "eastmoney": "东方财富（完整口径）",
+    "mixed": "备用源混合口径",
+    "sina": "新浪财经（量价）",
+    "ths": "同花顺涨停池（量价）",
+    "tencent": "腾讯证券（量价）",
+}
+
+
+def build_pool(rows: list[dict], source: str = "eastmoney",
+               snapshot=None) -> tuple[list[dict], dict]:
     """清洗 + 打分 + 排序，返回 (观察池, 市场概览)。
 
-    source=eastmoney：完整口径（含主力资金 / 超大单 / 行业共振）。
-    source=sina：降级口径（只有量价，资金与板块因子权重归零）。
+    source=eastmoney：东财完整口径（主力资金 / 超大单 / 行业共振参与评分）。
+    source=mixed/sina/ths/tencent：备用源口径，只用量价评分。备用源即使
+    补齐了资金数据，也仅作展示参考，绝不混进评分（口径不等价）。
     """
     has_fund = source == "eastmoney"
     cleaned: list[dict] = []
@@ -365,11 +259,14 @@ def build_pool(rows: list[dict], source: str = "eastmoney") -> tuple[list[dict],
             "sealed": is_limit_up(code, pct, name),
         })
 
-    # 板块共振：降级源无行业字段，跳过以免把所有股票误判为同一板块
+    # 板块共振：只有真实行业字段可用时才计算。备用源的 f100 一律为「其他」，
+    # 若照常计数会把全市场误判成同一板块，产生虚假共振标签与虚高分数。
+    sector_ok = has_fund and any(c["industry"] != "其他" for c in cleaned)
     sector_count: dict[str, int] = {}
-    if has_fund:
+    if sector_ok:
         for c in cleaned:
-            sector_count[c["industry"]] = sector_count.get(c["industry"], 0) + 1
+            if c["industry"] != "其他":
+                sector_count[c["industry"]] = sector_count.get(c["industry"], 0) + 1
 
     weights = WEIGHTS if has_fund else WEIGHTS_NO_FUND
     pool: list[dict] = []
@@ -382,12 +279,13 @@ def build_pool(rows: list[dict], source: str = "eastmoney") -> tuple[list[dict],
             "fund": _score_fund(c["main_pct"], c["main_net_yi"] * 1e8,
                                 c["float_mv_yi"] * 1e8) if has_fund else 60.0,
             "super": _clip(38 + (c["super_pct"] or 0) * 4.5) if has_fund else 60.0,
-            # 降级源无量比，用「成交额 / 流通市值」近似量能活跃度
-            "vol": (_score_vol(c["vol_ratio"]) if has_fund else
+            # 腾讯行情补齐后备用源也有真实量比，优先用真实值；
+            # 完全没有量比时才用「成交额 / 流通市值」近似量能活跃度。
+            "vol": (_score_vol(c["vol_ratio"]) if c["vol_ratio"] > 0 else
                     _clip(40 + c["amount_yi"] / max(c["float_mv_yi"], 1) * 100 * 3)),
             "turn": _score_turn(c["turnover"]),
             "sector": {1: 40, 2: 65, 3: 85}.get(sector_count.get(c["industry"], 1), 100)
-                      if has_fund else 50.0,
+                      if sector_ok else 50.0,
             "cap": _score_cap(c["float_mv_yi"]),
         }
         score = sum(factors[k] * w for k, w in weights.items())
@@ -403,7 +301,7 @@ def build_pool(rows: list[dict], source: str = "eastmoney") -> tuple[list[dict],
         if c["vol_ratio"] > 10:
             tags.append("异常放量")
             penalty += 5
-        if has_fund and sector_count.get(c["industry"], 1) >= 3:
+        if sector_ok and sector_count.get(c["industry"], 1) >= 3:
             tags.append("板块共振")
         if has_fund and c["super_pct"] and c["main_pct"] \
                 and c["super_pct"] >= c["main_pct"] * 0.8:
@@ -432,6 +330,11 @@ def build_pool(rows: list[dict], source: str = "eastmoney") -> tuple[list[dict],
         "top_sectors": top_sectors,
         "source": source,
         "has_fund": has_fund,
+        "source_label": snapshot.label if snapshot else SOURCE_LABELS.get(source, source),
+        "quality": snapshot.quality if snapshot else ("full" if has_fund else "minimal"),
+        "fund_comparable": snapshot.fund_comparable if snapshot else has_fund,
+        "fund_reference": (not has_fund) and any(r.get("f62") is not None for r in rows),
+        "notes": list(snapshot.notes) if snapshot else [],
         "avg_main_net_yi": round(
             sum(c["main_net_yi"] for c in pool[:TOP_N]) / max(1, len(pool[:TOP_N])), 2
         ),
@@ -447,10 +350,16 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
     time_txt = bj.strftime("%H:%M")
     has_fund = overview.get("has_fund", True)
 
-    fund_summary = (
-        f"Top{TOP_N} 平均主力净额 **{overview['avg_main_net_yi']:+.2f} 亿**"
-        if has_fund else "**数据源：新浪财经（量价口径，本期不含主力资金因子）**"
-    )
+    label = overview.get("source_label") or SOURCE_LABELS.get(
+        overview.get("source", ""), "备用源")
+    fund_reference = overview.get("fund_reference", False)
+    if has_fund:
+        fund_summary = f"Top{TOP_N} 平均主力净额 **{overview['avg_main_net_yi']:+.2f} 亿**"
+    elif fund_reference:
+        fund_summary = (f"**数据源：{label}（量价评分口径）** · "
+                        "备用渠道资金数据仅作参考、未计入评分")
+    else:
+        fund_summary = f"**数据源：{label}（量价口径，本期无主力资金数据）**"
     head = (
         f"**数据时点 {qt:%H:%M:%S}（北京时间）** · 扫描强势股 {overview['scanned']} 只 / "
         f"涨停约 {overview['limit_up']} 家 / 入池 {overview['qualified']} 只\n"
@@ -471,6 +380,8 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
                     f"换手{c['turnover']:.1f}% · 成交额{c['amount_yi']:.2f}亿 · "
                     f"流通市值{c['float_mv_yi']:.0f}亿"
                 )
+                if fund_reference and c["main_net_yi"]:
+                    detail += f" · 参考主力 {c['main_net_yi']:+.2f}亿"
             rows.append(
                 f"**{i}. {c['name']} `{c['code']}`　{c['score']}分 / {c['grade']}**\n"
                 f"<font color='{color}'>{c['pct']:+.2f}%</font> · {detail}\n"
@@ -486,7 +397,7 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
         )
     else:
         sector_md = ("无明显的行业共振" if has_fund
-                     else "量价降级源不提供行业数据，本期跳过板块共振分析")
+                     else f"{label} 不提供可比的行业字段，本期跳过板块共振分析")
 
     elements: list[dict] = [
         {"tag": "div", "text": {"tag": "lark_md", "content": head}},
@@ -501,14 +412,22 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
             "以 15:30 收盘选股为定稿信号，本推送不等同于收盘选股结果。</font>"}},
     ]
     if not has_fund:
+        extra = ("备用渠道已补到资金拆解，但与东财口径不等价，仅作展示、未计入评分；"
+                 if fund_reference else "本期无主力资金拆解；")
         elements.append({"tag": "div", "text": {"tag": "lark_md", "content":
-            "<font color='orange'>⚠️ 东方财富资金接口暂不可用，已自动切换新浪行情，"
-            "本期按量价口径评分（涨幅 / 换手 / 成交额 / 流通市值），不含主力资金与板块共振。</font>"}})
+            f"<font color='orange'>⚠️ 主数据源降级至 {label}"
+            f"（{overview.get('quality', 'minimal')}）：本期按量价口径评分"
+            f"（涨幅/量比/换手/成交额/流通市值），{extra}"
+            "不含行业共振，分数不可与历史东财口径直接比较。</font>"}})
+        if overview.get("notes"):
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text",
+                "content": "容灾轨迹：" + "；".join(overview["notes"][:3])}]})
     src_note = (
-        "数据来源：东方财富实时行情｜评分：涨幅/量比/换手/主力资金/超大单/板块共振/市值加权。"
+        "数据来源：东方财富实时行情（多域名容灾）｜评分：涨幅/量比/换手/主力资金/超大单/板块共振/市值加权。"
         "主力资金为按成交单笔金额推断的统计量，非席位真实资金。"
         if has_fund else
-        "数据来源：新浪财经全市场涨幅榜（降级源）｜评分：涨幅/换手/成交额/流通市值加权。"
+        f"数据来源：{label}｜评分：涨幅/量比/换手/成交额/流通市值加权。"
+        "降级口径分数仅用于当日内部排序，不与历史东财口径比较。"
     )
     elements += [
         {"tag": "note", "elements": [{"tag": "plain_text", "content":
@@ -557,8 +476,12 @@ def card_to_text(pool: list[dict], overview: dict, quote_ts: int) -> str:
         f"📊 盘中选股观察池 · {bj:%Y-%m-%d %H:%M}（盘中快照）",
         f"数据时点 {qt:%H:%M:%S} | 扫描 {overview['scanned']} 只 | 涨停约 {overview['limit_up']} 家 | 入池 {overview['qualified']} 只",
     ]
+    label = overview.get("source_label") or "备用源"
     if not has_fund:
-        lines.append("⚠️ 东方财富资金接口暂不可用，本期为新浪量价口径（不含主力资金）")
+        extra = ("备用资金数据仅作参考、未计入评分" if overview.get("fund_reference")
+                 else "本期无主力资金数据")
+        lines.append(f"⚠️ 主数据源降级至 {label}：按量价口径评分，{extra}，"
+                     "分数不可与历史东财口径直接比较")
     lines.append("")
     for i, c in enumerate(pool[:TOP_N], 1):
         detail = (
@@ -574,10 +497,11 @@ def card_to_text(pool: list[dict], overview: dict, quote_ts: int) -> str:
     lines += [
         "",
         ("板块共振：" + ("、".join(f"{s['name']}{s['count']}只" for s in overview["top_sectors"]) or "无明显共振"))
-        if has_fund else "板块共振：降级源无行业数据，本期跳过",
+        if has_fund else f"板块共振：{label} 无可比行业数据，本期跳过",
         "",
         "⚠️ 盘中实时快照，午后可能变盘；以 15:30 收盘选股为定稿，不等于收盘信号。",
-        ("数据来源：东方财富。" if has_fund else "数据来源：新浪财经（降级源）。")
+        ("数据来源：东方财富（多域名容灾）。" if has_fund
+         else f"数据来源：{label}（降级源）。")
         + "仅供研究复盘，不构成投资建议。",
     ]
     return "\n".join(lines)
@@ -646,13 +570,18 @@ def main() -> int:
         print("非交易日，跳过盘中选股与推送")
         return 0
 
-    rows, quote_ts, source = fetch_market_snapshot()
+    rows, quote_ts, source, snap = fetch_market_snapshot()
     if not rows:
-        print("❌ 未取到实时行情数据")
+        print("❌ 未取到实时行情数据（全部数据源失效）")
         return 1
-    pool, overview = build_pool(rows, source)
+    pool, overview = build_pool(rows, source, snap)
     print(
-        f"[数据源] {source}（{'完整资金口径' if overview['has_fund'] else '量价降级口径'}）\n"
+        f"[数据源] {overview['source_label']} · 口径 {source} / 质量 {overview['quality']}"
+        f"（{'完整资金' if overview['has_fund'] else '量价降级'}）"
+    )
+    for note in overview["notes"]:
+        print(f"          · {note}")
+    print(
         f"[扫描] 强势股 {overview['scanned']} 只 → 入池 {overview['qualified']} 只；"
         f"涨停约 {overview['limit_up']} 家；板块共振 "
         f"{', '.join(s['name'] + str(s['count']) for s in overview['top_sectors'][:3]) or '无'}"

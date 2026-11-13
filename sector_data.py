@@ -5,6 +5,42 @@
 import requests
 import re
 import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from utils import biga_sources as bs  # noqa: E402  板块榜备用源（东财多域名）
+
+
+def _board_fallback(kind: str):
+    """新浪板块接口失效时，用东财板块榜（多域名）重建涨跌列表。"""
+    try:
+        rows = bs.fetch_board_em(kind, limit=100)
+        out = [{"name": r["name"], "pct": r["pct"] or 0.0}
+               for r in rows if r["name"] and r["pct"] is not None]
+        out.sort(key=lambda x: x["pct"], reverse=True)
+        print(f"[数据源] {kind} 板块：东财板块榜（新浪接口降级）")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ {kind} 板块全部数据源不可用：{type(exc).__name__} {exc}")
+        return []
+
+
+def _fund_flow_fallback():
+    """新浪板块资金流失效时，用东财板块主力净额榜降级。"""
+    try:
+        rows = bs.fetch_board_em("industry", sort_field="f62", limit=100)
+        inflow = [{"name": r["name"], "fund": r["main_net"] / 1e8}
+                  for r in rows if r["name"] and r["main_net"] and r["main_net"] > 0][:5]
+        outflow = sorted(
+            [{"name": r["name"], "fund": r["main_net"] / 1e8}
+             for r in rows if r["name"] and r["main_net"] and r["main_net"] < 0],
+            key=lambda x: x["fund"])[:5]
+        print("[数据源] 板块资金：东财主力净额榜（新浪接口降级）")
+        return inflow, outflow
+    except Exception as exc:  # noqa: BLE001
+        print(f"⚠️ 板块资金全部数据源不可用：{type(exc).__name__} {exc}")
+        return [], []
 
 
 def get_industry_sectors():
@@ -12,6 +48,7 @@ def get_industry_sectors():
     try:
         url = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
         resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        resp.encoding = "gbk"  # 新浪板块接口返回 GBK，不指定会乱码
         match = re.search(r"=\s*(\{.*\})", resp.text, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
@@ -23,10 +60,11 @@ def get_industry_sectors():
                     pct = float(parts[4]) if parts[4] else 0
                     sectors.append({"name": name, "pct": pct})
             sectors.sort(key=lambda x: x["pct"], reverse=True)
-            return sectors
+            if sectors:
+                return sectors
     except Exception:
         pass
-    return []
+    return _board_fallback("industry")
 
 
 def get_concept_sectors():
@@ -34,6 +72,7 @@ def get_concept_sectors():
     try:
         url = "https://vip.stock.finance.sina.com.cn/q/view/newSinaGN.php"
         resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        resp.encoding = "gbk"  # 新浪板块接口返回 GBK，不指定会乱码
         match = re.search(r"=\s*(\{.*\})", resp.text, re.DOTALL)
         if match:
             data = json.loads(match.group(1))
@@ -45,10 +84,11 @@ def get_concept_sectors():
                     pct = float(parts[3]) if parts[3] else 0
                     sectors.append({"name": name, "pct": pct})
             sectors.sort(key=lambda x: x["pct"], reverse=True)
-            return sectors
+            if sectors:
+                return sectors
     except Exception:
         pass
-    return []
+    return _board_fallback("concept")
 
 
 def get_sector_fund_flow():
@@ -79,10 +119,11 @@ def get_sector_fund_flow():
             if net < 0:
                 outflow.append({"name": name, "fund": net})
         
-        return inflow, outflow
+        if inflow or outflow:
+            return inflow, outflow
     except Exception:
         pass
-    return [], []
+    return _fund_flow_fallback()
 
 
 def format_sector_message():

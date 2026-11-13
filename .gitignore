@@ -7,6 +7,11 @@ data/running/
 
 # 日志
 logs/
+data/scheduler.log
+
+# 本地定时兜底 / 数据源体检产物
+data/.scheduler_state.json
+sources-health.json
 
 # Python
 __pycache__/

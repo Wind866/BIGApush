@@ -1,0 +1,42 @@
+name: 数据源健康自检
+
+# 只读探测全部已接入接口，不写数据库、不推飞书、不产生交易信号。
+# 手动：Actions → 数据源健康自检 → Run workflow
+# 自动：每周一北京时间 09:00（UTC 01:00）体检一次，结果写入 Run Summary。
+on:
+  schedule:
+    - cron: '0 1 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-health
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 逐项探测并生成报告
+        run: |
+          python check_sources.py --markdown --out sources-health.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 保存检查结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-health
+          path: sources-health.json
+          retention-days: 30

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-盘中选股观察池（北京时间 13:00）
+盘中选股观察池（北京时间 13:13）
 
 设计目标：
 1. 独立于主程序 main.py —— 不依赖 akshare / 数据库 / 首次全量初始化，
@@ -408,8 +408,8 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**🔥 板块共振**\n{sector_md}"}},
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content":
-            "<font color='orange'>⚠️ 这是 13:00 盘中实时快照，午后仍可能变盘；"
-            "以 15:30 收盘选股为定稿信号，本推送不等同于收盘选股结果。</font>"}},
+            "<font color='orange'>⚠️ 这是 13:13 盘中实时快照，午后仍可能变盘；"
+            "以 15:43 收盘选股为定稿信号，本推送不等同于收盘选股结果。</font>"}},
     ]
     if not has_fund:
         extra = ("备用渠道已补到资金拆解，但与东财口径不等价，仅作展示、未计入评分；"
@@ -499,7 +499,7 @@ def card_to_text(pool: list[dict], overview: dict, quote_ts: int) -> str:
         ("板块共振：" + ("、".join(f"{s['name']}{s['count']}只" for s in overview["top_sectors"]) or "无明显共振"))
         if has_fund else f"板块共振：{label} 无可比行业数据，本期跳过",
         "",
-        "⚠️ 盘中实时快照，午后可能变盘；以 15:30 收盘选股为定稿，不等于收盘信号。",
+        "⚠️ 盘中实时快照，午后可能变盘；以 15:43 收盘选股为定稿，不等于收盘信号。",
         ("数据来源：东方财富（多域名容灾）。" if has_fund
          else f"数据来源：{label}（降级源）。")
         + "仅供研究复盘，不构成投资建议。",
@@ -570,7 +570,7 @@ def late_minutes(expect: str) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="盘中选股观察池（13:00）")
+    ap = argparse.ArgumentParser(description="盘中选股观察池（13:13）")
     ap.add_argument("--dry-run", action="store_true", help="本地试跑，不推送飞书")
     ap.add_argument("--check-trading-day", action="store_true", help="仅检查交易日并输出给 GitHub Actions")
     ap.add_argument("--json", action="store_true", help="打印完整观察池 JSON（调试用）")

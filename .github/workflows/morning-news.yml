@@ -1,11 +1,11 @@
 name: 早间新闻
 
-# 北京时间 = UTC+8，每天 08:37 推送早间要闻（周末也推送财经新闻）
+# 北京时间 = UTC+8，每天 08:43 推送早间要闻（周末也推送财经新闻）
 # 分钟数避开 :00 / :30。GitHub schedule 只保证"尽力而为"，延迟 ≥60 分钟时
 # 脚本会在消息里标注"延迟推送"，避免"早安"在中午发出还不自知。
 on:
   schedule:
-    - cron: '37 0 * * *'
+    - cron: '43 0 * * *'
   workflow_dispatch:
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
       - name: 推送早间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          EXPECT_HHMM: '0837'
+          EXPECT_HHMM: '0843'
         run: python daily_news.py
 
       - name: 失败告警

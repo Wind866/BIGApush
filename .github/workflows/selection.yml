@@ -1,12 +1,13 @@
 name: 收盘选股
 
-# 北京时间 = UTC+8。15:37 收盘定稿（周一至周五），节假日由交易日预检跳过。
+# 北京时间 = UTC+8。15:43 收盘定稿（周一至周五），节假日由交易日预检跳过。
+# 分钟数与 limit-up-relay 的 15:37 错开 6 分钟，避免两条消息同一时刻涌入。
 # 分钟数避开 :00 / :30 —— 整点是 GitHub 调度器最拥堵的时刻。
 # 注意：GitHub 的 schedule 只保证"尽力而为"，实测可能晚数小时。
 # 收盘选股用的是收盘数据，晚跑不影响结论，但会在 Run Summary 里标注延迟分钟数。
 on:
   schedule:
-    - cron: '37 7 * * 1-5'
+    - cron: '43 7 * * 1-5'
   workflow_dispatch:
     inputs:
       skip_update:
@@ -48,11 +49,11 @@ jobs:
       - name: 调度延迟检查（仅提示，不阻断）
         if: github.event_name == 'schedule'
         run: |
-          planned=$(date -d "today 15:37" +%s)
+          planned=$(date -d "today 15:43" +%s)
           late=$(( ( $(date +%s) - planned ) / 60 ))
           if [ "$late" -lt 0 ]; then late=$(( late + 1440 )); fi
           if [ "$late" -ge 30 ]; then
-            echo "::warning::比计划（北京 15:37）晚 $late 分钟，属 GitHub 调度延迟；收盘数据不受影响"
+            echo "::warning::比计划（北京 15:43）晚 $late 分钟，属 GitHub 调度延迟；收盘数据不受影响"
             echo "### ⚠️ 调度延迟 $late 分钟" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "准点运行（偏差 ${late} 分钟）"

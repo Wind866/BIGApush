@@ -1,11 +1,11 @@
 name: 晚间新闻
 
-# 北京时间 = UTC+8，每天 22:07 推送收盘总结与晚间要闻
+# 北京时间 = UTC+8，每天 22:13 推送收盘总结与晚间要闻
 # 分钟数避开 :00 / :30。GitHub schedule 只保证"尽力而为"，延迟 ≥60 分钟时
 # 脚本会在消息里标注"延迟推送"，避免凌晨收到"晚间总结"却看不出来是补发的。
 on:
   schedule:
-    - cron: '7 14 * * *'
+    - cron: '13 14 * * *'
   workflow_dispatch:
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
       - name: 推送晚间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          EXPECT_HHMM: '2207'
+          EXPECT_HHMM: '2213'
         run: python evening_news.py
 
       - name: 失败告警

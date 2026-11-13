@@ -18,7 +18,7 @@ feishu:
 
 # 定时任务配置（仅本地 schedule 模式参考；GitHub Actions 以 workflow cron 为准）
 schedule:
-  time: "15:30"  # 收盘选股时间（北京时间）
+  time: "15:43"  # 收盘选股时间（北京时间，与 .github/workflows/selection.yml 的 cron 保持一致）
 
 # 数据更新配置
 update:

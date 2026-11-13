@@ -15,6 +15,10 @@ BJ_TZ = timezone(timedelta(hours=8))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sector_data import format_sector_message
 from utils import biga_sources as bs
+from utils.push_guard import should_skip
+
+# 本文件对应的工作流，用于幂等检查（外部定时器与仓库 cron 会重复触发）
+WORKFLOW_FILE = "evening-news.yml"
 
 
 def get_index_data():
@@ -101,6 +105,12 @@ def main():
             print(f"::error::{msg}")
             sys.exit(1)
         print(f"::warning::{msg}")
+        return
+
+    # 幂等守卫：Cloudflare Worker 准点触发 + GitHub cron 延迟触发会打两次，
+    # 同一档期只让先到的那次真的推送（FORCE_PUSH=1 或 --force 可强制重推）
+    force = "--force" in sys.argv or os.environ.get("FORCE_PUSH", "").strip() in ("1", "true", "yes")
+    if should_skip(WORKFLOW_FILE, force=force):
         return
 
     # 标题

@@ -1,0 +1,13 @@
+name = "biga-push-cron"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+# GH_TOKEN 不要写在这里，用：npx wrangler secret put GH_TOKEN
+[vars]
+REPO = "Wind866/BIGApush"
+WORKFLOWS = "evening-news.yml"
+BRANCH = "main"
+
+# Cloudflare cron 一律 UTC。13:14 UTC = 北京 22:13
+[triggers]
+crons = ["13 14 * * *"]

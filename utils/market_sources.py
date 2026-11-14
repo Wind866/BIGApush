@@ -379,7 +379,8 @@ def blank_quote(code: str, name: str = "", source: str = "") -> dict:
 # 供应商 1：东方财富
 # ---------------------------------------------------------------------------
 
-def em_fetch_pool(kind: str, day: dt.date, *, page_size: int = 200) -> dict:
+def em_fetch_pool(kind: str, day: dt.date, *, page_size: int = 200,
+                  timeout: float = 9.0) -> dict:
     endpoint = {"ZT": "getTopicZTPool", "ZB": "getTopicZBPool",
                 "DT": "getTopicDTPool"}[kind]
     sort = {"ZT": "fbt:asc", "ZB": "fbt:asc", "DT": "fund:asc"}[kind]
@@ -395,7 +396,7 @@ def em_fetch_pool(kind: str, day: dt.date, *, page_size: int = 200) -> dict:
                 url = (f"{host}/{endpoint}?ut={UT}&dpt=wz.ztzt&Pageindex={page}"
                        f"&pagesize={page_size}&sort={urllib.parse.quote(sort, safe='')}"
                        f"&date={target}")
-                data = http_json(url, referer=EM_REFERER, timeout=9, retries=2)
+                data = http_json(url, referer=EM_REFERER, timeout=timeout, retries=2)
                 block = data.get("data")
                 if not isinstance(block, dict):
                     raise SourceFailure(f"{host} 返回 data=null（rc={data.get('rc')}）")

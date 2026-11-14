@@ -227,7 +227,7 @@ BIGA_SOURCE_EASTMONEY=0 BIGA_SOURCE_SINA=0 python check_sources.py  # 多级演�
 │   └── market_sources.py    # 多源容灾底座（与 limit-up-relay 同源）
 ├── web/                     # Web 前端
 ├── data/                    # 数据文件（db 不上传）
-└── .github/workflows/       # 6 条 GitHub Actions 流水线
+└── .github/workflows/       # 10 条 GitHub Actions 流水线
 ```
 
 ## GitHub Actions 流水线
@@ -240,6 +240,8 @@ BIGA_SOURCE_EASTMONEY=0 BIGA_SOURCE_SINA=0 python check_sources.py  # 多级演�
 | `evening-news.yml` | 晚间新闻 | 每天 22:00 |
 | `keep-alive.yml` | 保持仓库活跃 | 每周二 01:00 |
 | `check-sources.yml` | 数据源健康自检（只读） | 每周一 09:00，也可手动运行 |
+| `stock-query.yml` | 个股深度分析（查任意股 → 策略信号 + 买入建议 → 推飞书） | 仅手动 |
+| `verify-valuation.yml` | 真实数据取自检（估值/资金流/行情/指标，只打日志不推送） | 仅手动 |
 
 所有流水线都配置了最小权限 `permissions: contents: read`、
 `concurrency` 防重复运行、`TZ: Asia/Shanghai` 与失败告警。

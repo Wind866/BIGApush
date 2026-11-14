@@ -56,7 +56,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.3";
+const BUILD = "2026-11-14.4";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -531,12 +531,12 @@ async function feishuChats(env) {
 }
 
 /** 某个群最近的消息（按时间倒序返回） */
-async function feishuRecentMessages(env, chatId, startSec) {
+async function feishuRecentMessages(env, chatId) {
   const token = await feishuToken(env);
   const url = new URL(`${FEISHU_API}/im/v1/messages`);
-  url.searchParams.set("container_id_type", "chat_id");
+  // 注意：容器类型是 chat（不是 chat_id）；receive_id_type=chat_id 是「发送消息」接口的写法
+  url.searchParams.set("container_id_type", "chat");
   url.searchParams.set("container_id", chatId);
-  url.searchParams.set("start_time", String(startSec));
   url.searchParams.set("sort_type", "ByCreateTimeDesc");
   url.searchParams.set("page_size", "20");
   const res = await fetch(url.toString(), { headers: { authorization: `Bearer ${token}` } });
@@ -556,8 +556,9 @@ async function pollFeishu(env) {
   if (!appId || !secret) return "未配置 FEISHU_APP_ID / FEISHU_APP_SECRET，轮询跳过";
 
   if (!pollBootAt) pollBootAt = Date.now();
+  // 只处理最近一段时间的消息。接口返回的 create_time 是**毫秒**时间戳字符串，
+  // 这里本地过滤，不用 start_time 参数（那个参数的单位和「是否必须成对」都容易踩坑）。
   const from = Math.max(Date.now() - POLL_WINDOW_MS, pollBootAt - POLL_FIRST_LOOKBACK_MS);
-  const startSec = Math.floor(from / 1000);
 
   const bot = await feishuBotInfo(env);
   report.push(`机器人：${bot.name || "(未命名)"} open_id=${bot.id || "?"}`);
@@ -571,12 +572,17 @@ async function pollFeishu(env) {
   for (const chatId of chatIds) {
     let items = [];
     try {
-      items = await feishuRecentMessages(env, chatId, startSec);
+      items = await feishuRecentMessages(env, chatId);
     } catch (err) {
       report.push(`  ${chatId} 拉取失败：${err}`);
       continue;
     }
-    report.push(`  ${chatId} 最近 ${items.length} 条`);
+    const fetched = items.length;
+    items = items.filter((it) => {
+      const t = Number(it.create_time);
+      return Number.isFinite(t) && t > 0 ? t >= from : true;
+    });
+    report.push(`  ${chatId} 最近 ${fetched} 条，落在窗口内 ${items.length} 条`);
     // 接口是时间倒序，翻过来正序处理，保证「先问先答」
     for (const it of items.slice().reverse()) {
       const id = it.message_id || "";

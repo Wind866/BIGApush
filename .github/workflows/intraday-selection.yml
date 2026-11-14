@@ -1,22 +1,22 @@
 name: 盘中选股
 
 # 北京时间 = UTC+8。13:13 盘中快照（周一至周五），节假日由脚本自动跳过。
-# 分钟数与 limit-up-relay 的 13:07 错开 6 分钟，避免两条消息同一时刻涌入。
-# 分钟数避开 :00 / :30 —— 整点是 GitHub 调度器最拥堵的时刻。
-# GitHub 的 schedule 只保证"尽力而为"（实测可晚数小时），因此脚本带延迟守卫：
-# 迟到 ≥90 分钟即判定"已非盘中"，只算不推，避免把收盘数据当盘中发出去。
+# 分钟数避开 :00 / :30，并与 limit-up-relay 的 13:07 错开 6 分钟。
+# 准点由 Cloudflare Worker 触发；GitHub cron 只作兜底。
+# 迟到不再拦截推送（见脚本内说明），重复由台账幂等守卫负责。
 on:
   schedule:
     - cron: '13 5 * * 1-5'
   workflow_dispatch:
     inputs:
       force:
-        description: 非交易日也强制运行（调试用）
+        description: '本档期已推过也强制再推一次（调试用）'
         type: boolean
         default: false
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
 
 concurrency:
   group: intraday-selection
@@ -44,9 +44,10 @@ jobs:
         if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          # 计划时刻，供脚本判断本次是否已经迟到（迟到 ≥90 分钟只算不推）
-          # 仅 schedule 触发时注入：手动 dispatch 是"我现在就要结果"，不该被当成迟到而静默跳过
+          # 计划时刻仅用于卡片标注，不再用于拦截推送
           EXPECT_HHMM: "${{ github.event_name == 'schedule' && '1313' || '' }}"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_PUSH: ${{ inputs.force && '1' || '' }}
         run: python intraday_selection.py
 
       - name: 非交易日提示
@@ -56,10 +57,12 @@ jobs:
       - name: 失败告警
         if: failure()
         env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -z "$FEISHU_WEBHOOK" ]; then echo "未配置 FEISHU_WEBHOOK，跳过失败告警"; exit 0; fi
-          curl -sS -X POST "$FEISHU_WEBHOOK" -H "Content-Type: application/json" \
+          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
+          if [ -z "$HOOK" ]; then echo "未配置告警 webhook，跳过失败告警"; exit 0; fi
+          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
             -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 盘中选股任务运行失败，请查看日志：$RUN_URL\"}}" \
             >/dev/null || true

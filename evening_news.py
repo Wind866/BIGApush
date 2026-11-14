@@ -15,7 +15,7 @@ BJ_TZ = timezone(timedelta(hours=8))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sector_data import format_sector_message
 from utils import biga_sources as bs
-from utils.push_guard import should_skip
+from utils.push_guard import mark_pushed, should_skip
 
 # 本文件对应的工作流，用于幂等检查（外部定时器与仓库 cron 会重复触发）
 WORKFLOW_FILE = "evening-news.yml"
@@ -159,6 +159,8 @@ def main():
     msg = "\n".join(lines)
     if send_feishu(msg):
         print(f"✅ 晚间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
+        # 只有飞书确实推送成功才记档期；非交易日/调试/失败的运行不会污染台账
+        mark_pushed(WORKFLOW_FILE)
     else:
         print("❌ 推送失败")
         sys.exit(1)

@@ -15,6 +15,12 @@ BJ_TZ = timezone(timedelta(hours=8))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sector_data import format_sector_message
 from utils import biga_sources as bs
+from utils.push_guard import mark_pushed, should_skip
+
+WORKFLOW_FILE = "morning-news.yml"
+# 档期日界取早 08:00：08:43 正常档与延迟到当天 13:00（甚至次日 07:00）的触发
+# 都归到同一档。不能用 12 —— 08:43 减 12h 会落到前一天，与中午的延迟档分家。
+EDITION_CUTOFF_HOUR = 8
 
 
 def get_index_data():
@@ -104,6 +110,12 @@ def main():
         print(f"::warning::{msg}")
         return
 
+    # 幂等守卫：外部准点触发 + GitHub cron 延迟触发，同一档期只推一次。
+    # 只认「飞书确实推送成功」写入的台账，调试/跳过运行不会误杀当天的真实推送。
+    force = "--force" in sys.argv or os.environ.get("FORCE_PUSH", "").strip().lower() in ("1", "true", "yes")
+    if should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR):
+        return
+
     # 标题
     lines.append(f"☀️ 早安缅A ({now.strftime('%Y-%m-%d %A')})")
     lines.append("")
@@ -150,6 +162,7 @@ def main():
     msg = "\n".join(lines)
     if send_feishu(msg):
         print(f"✅ 早间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
+        mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR)
     else:
         print("❌ 推送失败")
         sys.exit(1)

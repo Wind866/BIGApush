@@ -36,6 +36,10 @@ BJ_TZ = timezone(timedelta(hours=8))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import biga_sources as bs  # noqa: E402  多源容灾层（东财/同花顺/新浪/腾讯）
+from utils.push_guard import mark_pushed, should_skip  # noqa: E402
+
+WORKFLOW_FILE = "intraday-selection.yml"
+EDITION_CUTOFF_HOUR = 12
 
 MIN_PCT = 3.0        # 只扫描涨幅 >= 3% 的强势股
 SCAN_FLOOR = 2.0     # 分页扫描到涨幅低于该值即停止
@@ -555,7 +559,7 @@ def emit_github_output(is_trading: bool) -> None:
 
 
 LATE_GRACE_MINUTES = 20          # 超过该延迟才提示
-INTRADAY_MAX_LATE_MINUTES = 90   # 盘中快照迟到超过该值：不推送，避免把收盘数据当盘中发出去
+INTRADAY_MAX_LATE_MINUTES = 90   # 超过该值只在卡片上标注时点，不再拦截推送
 
 
 def late_minutes(expect: str) -> int:
@@ -590,8 +594,14 @@ def main() -> int:
     late = late_minutes(expect)
     if late >= LATE_GRACE_MINUTES:
         print(f"⚠️ 计划 {expect[:2]}:{expect[2:]} 运行，实际晚了 {late} 分钟（GitHub 调度延迟）")
+    # 迟到只标注、不拦截：准点由外部 Worker 触发，GitHub cron 延迟到达时
+    # 由 should_skip() 读台账判重；若外部定时器尚未部署，迟到的一条也比完全没有强。
     if late >= INTRADAY_MAX_LATE_MINUTES and not args.dry_run:
-        print(f"::warning::盘中快照迟到 {late} 分钟，已非盘中口径 → 跳过推送（看板/数据不受影响）")
+        print(f"::warning::盘中快照迟到 {late} 分钟，卡片会标注实际时点，仍照常推送")
+
+    # 幂等守卫：同一档期只推一次（外部准点 + GitHub cron 兜底）
+    force = os.environ.get("FORCE_PUSH", "").strip().lower() in ("1", "true", "yes")
+    if not args.dry_run and should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR):
         return 0
 
     rows, quote_ts, source, snap = fetch_market_snapshot()
@@ -631,7 +641,10 @@ def main() -> int:
         return 0
 
     webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
-    return 0 if push(card, fallback, webhook) else 1
+    sent = push(card, fallback, webhook)
+    if sent:
+        mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR)
+    return 0 if sent else 1
 
 
 if __name__ == "__main__":

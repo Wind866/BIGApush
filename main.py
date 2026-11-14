@@ -721,6 +721,13 @@ B1完美图形匹配:
             if not is_trading_day(today_str):
                 print(f"今天 {today_str} 不是交易日，跳过选股")
                 sys.exit(0)
+
+            # 幂等守卫：外部准点触发 + GitHub cron 延迟触发，同一档期只推一次。
+            # 只认「飞书确实推送成功」写入的台账，非交易日/调试运行不会误杀当天推送。
+            from utils.push_guard import mark_pushed, should_skip
+            if should_skip("selection.yml", cutoff_hour=12):
+                print("⏭ 本档期已推送成功，跳过本次运行")
+                sys.exit(0)
             
             # 原有选股流程（支持B1完美图形匹配）
             if args.b1_match:
@@ -927,6 +934,7 @@ B1完美图形匹配:
                         sys.exit(1)
                 else:
                     print("✅ 收盘选股飞书推送成功")
+                    mark_pushed("selection.yml", cutoff_hour=12)
     
     elif args.command == 'web':
         # 启动Web服务器

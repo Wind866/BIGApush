@@ -1,14 +1,18 @@
-akshare>=1.11.0
-pandas>=2.0.0
-numpy>=1.24.0
-requests>=2.31.0
-PyYAML>=6.0
-schedule>=1.2.0
-flask>=3.0.0
-flask-socketio>=5.3.0
-matplotlib>=3.7.0
-scipy>=1.10.0
-Pillow>=10.0.0
-fastdtw>=0.3.4
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
+# 定时任务实际会用到的依赖；统一加主版本上界，避免上游 breaking change 打断每日推送。
+# 说明：flask / flask-socketio / schedule / matplotlib / scipy / fastdtw /
+# beautifulsoup4 / lxml 是原 KHunter 项目的 Web 界面与回测遗留，GitHub Actions
+# 只跑 main.py init / run 与几个标准库脚本，不会加载它们；后续可安全精简。
+akshare>=1.11.0,<2
+pandas>=2.0.0,<3
+numpy>=1.24.0,<3
+requests>=2.31.0,<3
+PyYAML>=6.0,<7
+schedule>=1.2.0,<2
+flask>=3.0.0,<4
+flask-socketio>=5.3.0,<6
+matplotlib>=3.7.0,<4
+scipy>=1.10.0,<2
+Pillow>=10.0.0,<12
+fastdtw>=0.3.4,<0.4
+beautifulsoup4>=4.12.0,<5
+lxml>=4.9.0,<6

@@ -1,13 +1,17 @@
-name = "biga-push-cron"
+name = "gh-actions-scheduler"
 main = "worker.js"
-compatibility_date = "2026-11-01"
+compatibility_date = "2026-11-14"
 
-# GH_TOKEN 不要写在这里，用：npx wrangler secret put GH_TOKEN
+# 只用一个 cron，占掉免费账号 5 个额度里的 1 个。
+# Worker 每分钟唤醒一次，内部按北京时间查表命中 9 个档期；未命中的分钟零网络请求。
+# 部署前请先删掉旧 Worker biga-push-cron 的 cron（13 14 * * *），否则晚间新闻会触发两次。
+[triggers]
+crons = ["* * * * *"]
+
 [vars]
-REPO = "Wind866/BIGApush"
-WORKFLOWS = "evening-news.yml"
+OWNER = "Wind866"
 BRANCH = "main"
 
-# Cloudflare cron 一律 UTC。13:14 UTC = 北京 22:13
-[triggers]
-crons = ["13 14 * * *"]
+# 以下两项是 Secret，不要写进本文件：
+#   npx wrangler secret put GH_TOKEN       # fine-grained PAT，勾 3 个仓库的 Actions: Read and write
+#   npx wrangler secret put ALERT_WEBHOOK  # 独立的飞书告警机器人 webhook

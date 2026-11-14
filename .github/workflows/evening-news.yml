@@ -1,12 +1,8 @@
 name: 晚间新闻
 
-# 北京时间 = UTC+8，每天 22:13 推送收盘总结与晚间要闻
-# 分钟数避开 :00 / :30。
-#
-# ⚠️ 重要：GitHub schedule 派发不可靠（实测 0/33 准时，延迟 3h17m~9h43m），
-# 所以这个 workflow 有两个触发器：
-#   1. Cloudflare Worker 在 22:13 准点 workflow_dispatch（见 cloudflare/README.md）
-#   2. 下面的 cron 作为兜底，延迟就延迟，反正脚本有幂等守卫，不会重复推送
+# 北京时间 = UTC+8，每天 22:13 推送收盘总结与晚间要闻。
+# 准点由 Cloudflare Worker 在 22:13 workflow_dispatch；下面的 cron 仅作兜底
+# （实测 0/34 准时，延迟 3h17m~9h43m）。脚本侧有台账幂等守卫，不会重复推送。
 on:
   schedule:
     - cron: '13 14 * * *'
@@ -17,9 +13,9 @@ on:
         type: boolean
         default: false
 
-# actions: read 是幂等守卫用的——要查「本档期是否已有成功运行」
+# actions: read 供守卫查运行记录；contents: write 供推送成功后写台账
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 concurrency:
@@ -46,9 +42,7 @@ jobs:
       - name: 推送晚间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          # 仅 schedule 触发时注入，手动 dispatch 不该在消息里标"延迟 N 分钟"
           EXPECT_HHMM: "${{ github.event_name == 'schedule' && '2213' || '' }}"
-          # 幂等守卫：查询本 workflow 当档期是否已推送成功
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
         run: python evening_news.py
@@ -56,10 +50,12 @@ jobs:
       - name: 失败告警
         if: failure()
         env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ -z "$FEISHU_WEBHOOK" ]; then echo "未配置 FEISHU_WEBHOOK，跳过失败告警"; exit 0; fi
-          curl -sS -X POST "$FEISHU_WEBHOOK" -H "Content-Type: application/json" \
+          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
+          if [ -z "$HOOK" ]; then echo "未配置告警 webhook，跳过失败告警"; exit 0; fi
+          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
             -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 晚间新闻任务运行失败，请查看日志：$RUN_URL\"}}" \
             >/dev/null || true

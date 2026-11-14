@@ -3,6 +3,7 @@ name: 数据源健康自检
 # 只读探测全部已接入接口，不写数据库、不推飞书、不产生交易信号。
 # 手动：Actions → 数据源健康自检 → Run workflow
 # 自动：每周一北京时间 09:00（UTC 01:00）体检一次，结果写入 Run Summary。
+# 准点由 Cloudflare Worker 触发；异常会推到独立告警机器人。
 on:
   schedule:
     - cron: '0 1 * * 1'
@@ -40,3 +41,16 @@ jobs:
           name: source-health
           path: sources-health.json
           retention-days: 30
+
+      - name: 失败告警
+        if: failure()
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
+          if [ -z "$HOOK" ]; then echo "未配置告警 webhook，跳过失败告警"; exit 0; fi
+          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 数据源健康自检任务运行失败，请查看日志：$RUN_URL\"}}" \
+            >/dev/null || true

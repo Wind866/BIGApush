@@ -170,22 +170,44 @@ class TechnicalAnalyzer:
         trend = "未知"
         strength = 0
         
-        # 基于MA判断趋势
-        if 'ma20' in data.columns and 'ma50' in data.columns and 'ma200' in data.columns:
+        # 基于MA判断趋势（自适应）
+        # MA200 需要 ≥200 个交易日才非空；行情窗口不足时旧逻辑四个分支全部落空，
+        # 趋势恒为「未知」。这里按可用均线降级：MA20/50/200 -> MA20/50 -> MA20。
+        if 'ma20' in data.columns:
             latest_data = data.iloc[-1]
-            
-            if latest_data['ma20'] > latest_data['ma50'] > latest_data['ma200']:
-                trend = "上升"
-                strength = 3
-            elif latest_data['ma20'] < latest_data['ma50'] < latest_data['ma200']:
-                trend = "下降"
-                strength = 3
-            elif latest_data['ma20'] > latest_data['ma50'] < latest_data['ma200']:
-                trend = "震荡"
-                strength = 1
-            elif latest_data['ma20'] < latest_data['ma50'] > latest_data['ma200']:
-                trend = "震荡"
-                strength = 1
+            ma20 = latest_data.get('ma20')
+            ma50 = latest_data.get('ma50')
+            ma200 = latest_data.get('ma200')
+            has20 = pd.notna(ma20)
+            has50 = pd.notna(ma50)
+            has200 = pd.notna(ma200)
+
+            if has20 and has50 and has200:
+                if ma20 > ma50 > ma200:
+                    trend = "上升"
+                    strength = 3
+                elif ma20 < ma50 < ma200:
+                    trend = "下降"
+                    strength = 3
+                elif ma20 > ma50 < ma200:
+                    trend = "震荡"
+                    strength = 1
+                elif ma20 < ma50 > ma200:
+                    trend = "震荡"
+                    strength = 1
+            elif has20 and has50:
+                # 数据不足以算 MA200：用 MA20/MA50 位置 + MA20 近 5 日斜率近似中期趋势
+                ma20_prev = data['ma20'].iloc[-6] if len(data) >= 6 else None
+                slope_up = pd.notna(ma20_prev) and ma20 > ma20_prev
+                if ma20 > ma50:
+                    trend, strength = ("上升", 2) if slope_up else ("震荡", 1)
+                else:
+                    trend, strength = ("下降", 2) if not slope_up else ("震荡", 1)
+            elif has20:
+                # 只有 MA20：用收盘价相对 MA20 的位置判断短期趋势
+                close = latest_data.get('close')
+                if pd.notna(close):
+                    trend, strength = ("上升", 1) if close >= ma20 else ("下降", 1)
         
         # 基于MACD判断趋势
         if 'macd' in data.columns and 'signal' in data.columns:

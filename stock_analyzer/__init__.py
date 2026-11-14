@@ -10,7 +10,7 @@ from pathlib import Path
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from .data_fetcher import DataFetcher
+from .data_fetcher import DataFetcher, period_to_days, MA200_MIN_DAYS
 from .technical_analyzer import TechnicalAnalyzer
 from .fundamental_analyzer import FundamentalAnalyzer
 from .fund_flow_analyzer import FundFlowAnalyzer
@@ -45,7 +45,11 @@ class StockAnalyzer:
             stock_info = self.data_fetcher.get_stock_basic(stock_code)
             
             # 2. 获取历史行情数据
-            quote_data = self.data_fetcher.get_stock_quote(stock_code, period=period)
+            # 技术分析要算 MA200，需要 ≥200 个交易日（约 280+ 自然日）。
+            # 前端默认只取 90d（~60 个交易日），MA200 恒为 NaN 导致趋势判定退化，
+            # 因此行情统一按 ≥400 自然日拉取；资金流/结论仍按用户选择的周期。
+            quote_period = period if period_to_days(period) >= MA200_MIN_DAYS else f'{MA200_MIN_DAYS}d'
+            quote_data = self.data_fetcher.get_stock_quote(stock_code, period=quote_period)
             
             # 3. 技术面分析（综合分析后转换为前端期望的格式）
             raw_technical = self.technical_analyzer.comprehensive_technical_analysis(quote_data)

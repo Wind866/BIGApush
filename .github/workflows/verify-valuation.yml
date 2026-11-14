@@ -1,8 +1,9 @@
 name: 验证 · 真实数据取数 (估值/资金流/行情)
 
 # 在 GitHub Actions runner（数据中心 IP）上真实跑一遍数据取数，确认
-# 估值(PE/PB/PS/市值)、资金流、行情(datacenter IP 下东财 push2 会被拦截，
-# 需由百度/同花顺/新浪兜底)均能取到真实值。仅手动触发，不随 push/PR 自动运行。
+# 估值(PE/PB/PS/市值)、资金流、行情、个股名称/行业(datacenter IP 下东财 push2
+# 会被拦截，需由百度/同花顺/新浪/巨潮兜底)均能取到真实值，且长周期行情足以
+# 计算 MA200（技术趋势不再退化）。仅手动触发，不随 push/PR 自动运行。
 on:
   workflow_dispatch:
     inputs:
@@ -82,4 +83,36 @@ jobs:
               print(f"[Q ] {code}: rows={rows}")
           print("RESULT_FF:", f"{ff_ok}/{len(codes)} 有资金流")
           print("RESULT_Q :", f"{q_ok}/{len(codes)} 有行情")
+          PY
+
+      - name: 基础信息(名称/行业) + 长周期行情(MA200) 验证
+        run: |
+          python - <<'PY'
+          import json, sys
+          sys.path.insert(0, '.')
+          from stock_analyzer.data_fetcher import DataFetcher
+          from stock_analyzer.technical_analyzer import TechnicalAnalyzer
+
+          # 数据中心 IP 下东财 push2 已不可用，这里验证名称/行业能由巨潮兜底补齐，
+          # 且 400 自然日行情足以算出 MA200、趋势不再退化为「未知」。
+          f = object.__new__(DataFetcher)
+          f.DEFAULT_STOCK_LIST = {}
+          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          info_ok = bars_ok = trend_ok = 0
+          for code in codes:
+              b = f.get_stock_basic(code)
+              q = f.get_stock_quote(code, '400d')
+              bars = 0 if q is None else len(q)
+              trend = TechnicalAnalyzer().analyze_trend(q).get('trend', '未知') if bars else '未知'
+              if b.get('name') and b['name'] != code and b.get('industry') not in ('', '未知行业'):
+                  info_ok += 1
+              if bars >= 200:
+                  bars_ok += 1
+              if trend and trend != '未知':
+                  trend_ok += 1
+              print(f"[INFO] {code}: {json.dumps(b, ensure_ascii=False)}")
+              print(f"[HIST] {code}: bars={bars} trend={trend}")
+          print("RESULT_INFO :", f"{info_ok}/{len(codes)} 名称行业齐全")
+          print("RESULT_MA200:", f"{bars_ok}/{len(codes)} 行情≥200根")
+          print("RESULT_TREND:", f"{trend_ok}/{len(codes)} 趋势已判定")
           PY

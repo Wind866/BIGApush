@@ -13,5 +13,8 @@ OWNER = "Wind866"
 BRANCH = "main"
 
 # 以下两项是 Secret，不要写进本文件：
-#   npx wrangler secret put GH_TOKEN       # fine-grained PAT，勾 3 个仓库的 Actions: Read and write
-#   npx wrangler secret put ALERT_WEBHOOK  # 独立的飞书告警机器人 webhook
+#   npx wrangler secret put GH_TOKEN           # fine-grained PAT，勾 3 个仓库的 Actions: Read and write
+#   npx wrangler secret put ALERT_WEBHOOK      # 独立的飞书告警机器人 webhook
+#   npx wrangler secret put FEISHU_APP_ID      # 自建应用 App ID（cli_ 开头），「群里发代码查个股」用
+#   npx wrangler secret put FEISHU_APP_SECRET  # 自建应用 App Secret
+#   npx wrangler secret put FEISHU_ENCRYPT_KEY # 可选，仅当飞书开了加密策略

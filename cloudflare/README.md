@@ -143,3 +143,87 @@ artifact；发现已覆盖范围内有漏跑就让任务失败、走告警。
 - Worker 无状态，不需要 KV / D1 / 任何存储；档期去重靠查 Actions API（3 分钟窗口）
 - CF cron 极端情况可能晚几秒到几分钟，与 GitHub 的「几小时」不是一个量级
 - A 股节假日不做硬编码，由各脚本自己的交易日探测跳过
+
+## 飞书机器人：群里发股票代码查个股
+
+除了「准点触发」，本 Worker 还兼了一个入口：群里发 `600519`，机器人回该股的深度分析。
+
+```
+群里发「600519,000001」
+      ↓ 飞书事件 im.message.receive_v1
+Worker POST /feishu  ← 你填进开放平台的事件订阅地址
+      ↓ 先回一句「已收到，约 1~2 分钟」
+      ↓ dispatch BIGApush/stock-query.yml（带 inputs.stocks）
+GitHub Actions 跑真实取数 → 结论推回群（走 FEISHU_WEBHOOK）
+```
+
+### 为什么必须用自建应用
+
+群里的**自定义机器人（webhook）只能发、不能收** —— 它收不到你发的消息，
+所以「群里输入代码」用 webhook 做不出来。双向只能走自建应用的事件订阅。
+
+### 一次性配置
+
+**1. 开放平台里开权限**
+
+<https://open.feishu.cn/app> → 选应用 → 权限管理 → 开通：
+
+| 权限 | 用途 |
+| --- | --- |
+| `im:message` | 读取群消息（收事件必需） |
+| `im:message:send_as_bot` | 以机器人身份发回执 |
+| `im:chat:readonly` | 可选，仅用于排查「机器人在哪些群」 |
+
+开完要**发布版本**（创建版本 → 申请发布），权限才生效。只加权限不发布 = 仍然 99991672。
+
+**2. 打开机器人能力**
+
+应用功能 → 机器人 → 开启；然后把这个机器人**拉进目标群**（群里 @ 它或从群设置添加）。
+
+**3. 配事件订阅**
+
+事件与回调 → 订阅方式选「**将事件发送至开发者服务器**」：
+
+- 请求地址：`https://<你的 Worker 域名>/feishu`
+- 添加事件：`接收消息 im.message.receive_v1`
+
+保存时飞书会立刻打一发 `url_verification`，本 Worker 会原样回 `challenge`，
+**保存成功就说明地址通了**。若这里报失败，先 `curl https://<域名>/feishu` 应返回一句说明文字。
+
+加密策略保持默认（不填 Encrypt Key）最省事；若一定要开，把 Encrypt Key 也配到 Worker：
+
+```bash
+npx wrangler secret put FEISHU_ENCRYPT_KEY
+```
+
+**4. 给 Worker 配 Secret**
+
+```bash
+npx wrangler secret put FEISHU_APP_ID        # cli_ 开头
+npx wrangler secret put FEISHU_APP_SECRET
+npx wrangler deploy
+```
+
+用 Dashboard 手工部署的话：Worker → Edit code → 粘贴 `cloudflare/worker.js` → Deploy，
+再到 Settings → Variables and Secrets 里加上面两个（类型选 Secret）。
+
+### 行为说明
+
+- 只认**文本消息里的 6 位连续数字**；闲聊不回应（避免机器人在群里刷屏）
+- 一次最多 6 只，超出部分丢弃并在回执里体现
+- 同一组代码 90 秒内只触发一次；飞书重投的同一 `event_id` 直接忽略
+- 非文本消息（图片/文件）回一句「只认文本股票代码」
+- 失败会回「触发失败，GH_TOKEN 可能已过期」，不会静默
+- 结果回到**提问的那个会话**（Worker 把 `chat_id` 传给 workflow）；万一按会话发送失败，
+  自动退回 `FEISHU_WEBHOOK` 绑定的群，不会石沉大海
+- 因此仓库侧也要配两个 Secret 才能「哪问哪答」：`FEISHU_APP_ID` / `FEISHU_APP_SECRET`
+  （与 Worker 用的是同一个自建应用）。只配 webhook 时，结果固定发到那个群
+
+### 自检
+
+```bash
+curl https://<域名>/health            # build 字段应为 2026-11-14.2 或更新，确认线上跑的是这版
+curl https://<域名>/feishu            # 应返回「飞书事件回调端点（接收 POST）」
+```
+
+线上版本不对是最常见的「代码改了没生效」原因，`/health` 的 `build` 就是为此加的。

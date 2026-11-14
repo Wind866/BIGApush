@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -236,6 +237,71 @@ def send_feishu(msg: str) -> bool:
         return False
 
 
+def _feishu_token():
+    """用自建应用换 tenant_access_token；没配凭证返回 None。"""
+    app_id = os.environ.get("FEISHU_APP_ID", "").strip()
+    secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
+    if not app_id or not secret:
+        return None
+    resp = requests.post(
+        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": secret},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"tenant_access_token 失败 {data.get('code')} {data.get('msg')}")
+    return data["tenant_access_token"]
+
+
+def send_to_chat(msg: str, chat_id: str) -> bool:
+    """用自建应用把结果发回「问这句话的那个会话」，群里问就回群里。
+
+    群自定义机器人（webhook）只能往一个固定群发，做不到「哪问哪答」，
+    所以由 Worker 把 chat_id 一起传下来。凭证缺失时返回 False，交给 webhook 兜底。
+    """
+    try:
+        token = _feishu_token()
+    except Exception as exc:  # noqa: BLE001
+        print(f"::warning::取 tenant_access_token 失败：{exc}")
+        return False
+    if not token:
+        print("::warning::未配置 FEISHU_APP_ID / FEISHU_APP_SECRET，无法按会话回复")
+        return False
+    try:
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages",
+            params={"receive_id_type": "chat_id"},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "text",
+                "content": json.dumps({"text": msg}, ensure_ascii=False),
+            },
+            timeout=15,
+        )
+        payload = resp.json()
+        if payload.get("code") != 0:
+            print(f"❌ 按会话发送失败：{payload.get('code')} {payload.get('msg')}")
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ 按会话发送异常：{type(exc).__name__} {exc}")
+        return False
+
+
+def push(msg: str) -> bool:
+    """优先「哪问哪答」；没拿到 chat_id 或发送失败就退回群 webhook。"""
+    chat_id = os.environ.get("FEISHU_CHAT_ID", "").strip()
+    if chat_id:
+        if send_to_chat(msg, chat_id):
+            print(f"[PUSH] 已发送到会话 {chat_id}")
+            return True
+        print("::warning::按会话发送失败，改用 FEISHU_WEBHOOK 兜底")
+    return send_feishu(msg)
+
+
 def write_summary(msg: str) -> None:
     """同时写一份到 GitHub Actions 运行页的 Summary，方便不开飞书也能看。"""
     path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
@@ -348,14 +414,17 @@ def main() -> int:
     print("------------------")
 
     write_summary(msg)
-    sent = send_feishu(msg)
+    sent = push(msg)
     print(f"[DONE] {ok}/{len(codes)} 只有结果，推送={'成功' if sent else '未发送'}")
 
-    # 一只都没成功，或者配了 webhook 却发不出去 —— 都要让 Actions 红，避免假绿
+    # 一只都没成功，或者明明配了推送通道却发不出去 —— 都要让 Actions 红，避免假绿
     if ok == 0:
         print("::error::全部股票分析失败")
         return 1
-    if os.environ.get("FEISHU_WEBHOOK", "").strip() and not sent:
+    configured = any(
+        os.environ.get(k, "").strip() for k in ("FEISHU_CHAT_ID", "FEISHU_WEBHOOK")
+    )
+    if configured and not sent:
         print("::error::飞书推送失败")
         return 1
     return 0

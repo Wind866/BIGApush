@@ -22,7 +22,8 @@
  *                           （不要和业务推送共用同一个，否则 webhook 挂了告警也发不出去）
  *   FEISHU_APP_ID      Secret  自建应用 App ID（cli_ 开头），用于「群里发代码查个股」
  *   FEISHU_APP_SECRET  Secret  自建应用 App Secret
- *   FEISHU_ENCRYPT_KEY Secret  可选，飞书后台开了加密策略时才需要
+ *   FEISHU_ENCRYPT_KEY Secret  可选，飞书后台开了加密策略时才需要（仅事件回调模式用）
+ *   FEISHU_CHAT_ID     Text    可选，指定要监听的群 id；不配则自动列出机器人所在的所有群
  *   OWNER           Text    Wind866
  *   BRANCH          Text    main
  *
@@ -31,7 +32,14 @@
  *   GET  /            说明
  *   GET  /health      档期表与配置状态（?check=1 顺带验 GH_TOKEN）
  *   GET  /test?at=HH:MM  手动触发某档期
- *   POST /feishu      飞书事件回调（im.message.receive_v1 → 触发个股查询）
+ *   GET  /feishu/poll 立刻轮询一次群消息（群里 @机器人 查个股，主用这条）
+ *   POST /feishu      飞书事件回调（仅在拥有公网域名时启用；workers.dev 国内不可达）
+ *
+ * 群里查个股怎么工作
+ * ----------------
+ * 主路径是**轮询**：cron 每 2 分钟唤醒 → 调飞书「获取会话历史消息」→ 找 @了机器人
+ * 且含 6 位数字的消息 → dispatch stock-query.yml。因为不依赖任何入站请求，
+ * 所以不需要域名、不需要事件订阅，也不受飞书「3 秒超时」限制。代价是最多延迟 2 分钟。
  *
  * 部署前必读
  * ----------
@@ -48,7 +56,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.2";
+const BUILD = "2026-11-14.3";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -443,7 +451,13 @@ async function handleFeishuMessage(env, event) {
   const codes = extractCodes(text);
   // 抓不到 6 位代码就当普通聊天，不回应 —— 否则机器人会在群里刷屏
   if (!codes.length) return;
+  await handleQuery(env, codes, chatId);
+}
 
+/**
+ * 冷却 + 回执 + 触发。事件回调与轮询两条路径共用，保证行为一致。
+ */
+async function handleQuery(env, codes, chatId) {
   const key = codes.join(",");
   const last = seenEvents.get(`q:${key}`) || 0;
   if (Date.now() - last < CODE_COOLDOWN_MS) {
@@ -460,6 +474,139 @@ async function handleFeishuMessage(env, event) {
   if (!ok) {
     await feishuSend(env, chatId, "❌ 触发分析任务失败（GH_TOKEN 可能已过期），请查看 Worker 日志。");
   }
+}
+
+// ===== 轮询模式：Worker 主动去群里捞「@机器人 + 6 位代码」 =====
+//
+// 为什么不用事件订阅
+// ----------------
+// 飞书回调要求一个公网 HTTPS 地址，而 *.workers.dev 在国内实测 200+ 节点全部超时
+// （只有港澳台通），飞书的回调服务器在国内机房，请求根本发不出来 —— 表现为
+// 「请求 3 秒超时」或「url invalid」。换成自建域名能解决，但要买域名、改 NS、等生效。
+//
+// 反过来做：Worker 每分钟本来就会被 cron 唤醒，顺手调飞书「获取会话历史消息」接口，
+// 把最近几分钟里 @了机器人 的消息捞出来处理。**不需要任何公网回调地址**，
+// 因此也不需要域名、不需要事件订阅、不受 3 秒超时限制。
+//
+// 代价：响应延迟最多一个轮询间隔（这里取 2 分钟），不是秒回。
+//
+// 需要的权限（飞书开放平台 → 权限管理，开完必须发布版本）
+//   im:message                    收发消息
+//   im:message:send_as_bot        以机器人身份发消息
+//   im:message.group_msg          获取群组中所有消息（读历史，敏感权限）
+//   im:chat:readonly              获取机器人所在群列表（自动找 chat_id 用，可选：
+//                                 直接在变量里配 FEISHU_CHAT_ID 就不需要这个权限）
+
+const POLL_EVERY_MIN = 2;                   // 每 2 分钟轮询一次
+const POLL_WINDOW_MS = 5 * 60 * 1000;       // 每次只看最近 5 分钟的消息
+const POLL_FIRST_LOOKBACK_MS = 90 * 1000;   // 实例首次轮询只回看 90 秒，避免把历史消息全部重跑
+
+const pollSeen = new Map();                 // message_id 去重（实例级）
+let pollBootAt = 0;
+let botInfoCache = { id: "", name: "", exp: 0 };
+
+/** 机器人自己的 open_id，用来判断消息里 @ 的是不是它 */
+async function feishuBotInfo(env) {
+  if (botInfoCache.id && Date.now() < botInfoCache.exp) return botInfoCache;
+  const token = await feishuToken(env);
+  const res = await fetch(`${FEISHU_API}/bot/v3/info`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`bot/v3/info 失败 ${data.code} ${data.msg}`);
+  const bot = data.bot || {};
+  botInfoCache = { id: bot.open_id || "", name: bot.app_name || "", exp: Date.now() + 3600 * 1000 };
+  return botInfoCache;
+}
+
+/** 机器人所在的群列表。配了 FEISHU_CHAT_ID 就不用调这个（免 im:chat:readonly 权限） */
+async function feishuChats(env) {
+  const token = await feishuToken(env);
+  const res = await fetch(`${FEISHU_API}/im/v1/chats?page_size=50`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`im/v1/chats 失败 ${data.code} ${data.msg}`);
+  return ((data.data || {}).items || []).map((c) => c.chat_id).filter(Boolean);
+}
+
+/** 某个群最近的消息（按时间倒序返回） */
+async function feishuRecentMessages(env, chatId, startSec) {
+  const token = await feishuToken(env);
+  const url = new URL(`${FEISHU_API}/im/v1/messages`);
+  url.searchParams.set("container_id_type", "chat_id");
+  url.searchParams.set("container_id", chatId);
+  url.searchParams.set("start_time", String(startSec));
+  url.searchParams.set("sort_type", "ByCreateTimeDesc");
+  url.searchParams.set("page_size", "20");
+  const res = await fetch(url.toString(), { headers: { authorization: `Bearer ${token}` } });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`im/v1/messages 失败 ${data.code} ${data.msg}`);
+  return (data.data || {}).items || [];
+}
+
+/**
+ * 扫一遍所有群，处理 @机器人 + 6 位代码 的消息。
+ * 返回一份人类可读的报告（/feishu/poll 会直接把它显示在浏览器里，便于自检）。
+ */
+async function pollFeishu(env) {
+  const report = [];
+  const appId = (env.FEISHU_APP_ID || "").trim();
+  const secret = (env.FEISHU_APP_SECRET || "").trim();
+  if (!appId || !secret) return "未配置 FEISHU_APP_ID / FEISHU_APP_SECRET，轮询跳过";
+
+  if (!pollBootAt) pollBootAt = Date.now();
+  const from = Math.max(Date.now() - POLL_WINDOW_MS, pollBootAt - POLL_FIRST_LOOKBACK_MS);
+  const startSec = Math.floor(from / 1000);
+
+  const bot = await feishuBotInfo(env);
+  report.push(`机器人：${bot.name || "(未命名)"} open_id=${bot.id || "?"}`);
+
+  const fixed = (env.FEISHU_CHAT_ID || "").trim();
+  const chatIds = fixed ? [fixed] : await feishuChats(env);
+  report.push(`扫描群数：${chatIds.length}${fixed ? "（来自 FEISHU_CHAT_ID）" : ""}`);
+  if (!chatIds.length) report.push("机器人不在任何群里？把它拉进目标群再试");
+
+  let handled = 0;
+  for (const chatId of chatIds) {
+    let items = [];
+    try {
+      items = await feishuRecentMessages(env, chatId, startSec);
+    } catch (err) {
+      report.push(`  ${chatId} 拉取失败：${err}`);
+      continue;
+    }
+    report.push(`  ${chatId} 最近 ${items.length} 条`);
+    // 接口是时间倒序，翻过来正序处理，保证「先问先答」
+    for (const it of items.slice().reverse()) {
+      const id = it.message_id || "";
+      if (!id || pollSeen.has(id)) continue;
+      pollSeen.set(id, Date.now());
+
+      if (((it.sender || {}).sender_type || "user") === "app") continue;   // 不处理机器人自己发的
+      if (it.msg_type !== "text") continue;
+      // 必须 @ 了本机器人：群里别人的 6 位数字（订单号、金额）不该被当成股票代码
+      const mentioned = (it.mentions || []).some((m) => ((m.id || {}).open_id || "") === bot.id);
+      if (!mentioned) continue;
+
+      let text = "";
+      try {
+        text = JSON.parse((it.body || {}).content || "{}").text || "";
+      } catch {
+        text = "";
+      }
+      const codes = extractCodes(text);
+      if (!codes.length) continue;
+
+      report.push(`  → 命中 ${codes.join(",")}（${id}）`);
+      await handleQuery(env, codes, chatId);
+      handled += 1;
+    }
+  }
+
+  if (pollSeen.size > 500) pollSeen.clear();
+  report.push(`本次处理 ${handled} 条查询`);
+  return report.join("\n");
 }
 
 async function handleFeishu(req, env, ctx) {
@@ -546,6 +693,11 @@ export default {
     if (Number(bj.hhmm.slice(3)) % 5 === 0) {
       ctx.waitUntil(catchUp(env, bj));
     }
+
+    // 每 2 分钟去飞书群里捞一次 @机器人 的消息（替代不可用的公网回调）
+    if (Number(bj.hhmm.slice(3)) % POLL_EVERY_MIN === 0) {
+      ctx.waitUntil(pollFeishu(env).catch((err) => console.error(`[POLL] ${err}`)));
+    }
   },
 
   async fetch(req, env, ctx) {
@@ -559,6 +711,16 @@ export default {
         });
       }
       return handleFeishu(req, env, ctx);
+    }
+
+    // 手动跑一次轮询，报告直接显示在浏览器里 —— 配完权限后用这个自检最快
+    if (url.pathname === "/feishu/poll") {
+      try {
+        const text = await pollFeishu(env);
+        return new Response(`${text}\n`, { headers: { "content-type": "text/plain; charset=utf-8" } });
+      } catch (err) {
+        return new Response(`轮询失败：${err}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
     }
 
     if (url.pathname === "/health") {
@@ -582,6 +744,8 @@ export default {
         schedule: PLAN.map((s) => `${s.at} ${s.name} [${s.targets.length}]`),
         tokenValid,
         alertConfigured: Boolean((env.ALERT_WEBHOOK || "").trim()),
+        feishuApp: Boolean((env.FEISHU_APP_ID || "").trim()),
+        feishuPollEveryMin: POLL_EVERY_MIN,
         note: "根路径不会触发任务；/test?at=HH:MM 手动测某档期，/health?check=1 校验 token；build 字段用于核对线上是否为此版代码",
       });
     }
@@ -600,7 +764,7 @@ export default {
     }
 
     return new Response(
-      "GitHub Actions 统一准点调度器\n\n/health            查看档期表与配置状态\n/health?check=1     校验 GH_TOKEN\n/test?at=22:13     手动触发某个档期（自测用）\n/feishu            POST，飞书事件回调用（群里发股票代码查个股）\n",
+      "GitHub Actions 统一准点调度器\n\n/health            查看档期表与配置状态\n/health?check=1     校验 GH_TOKEN\n/test?at=22:13     手动触发某个档期（自测用）\n/feishu/poll       立刻轮询一次飞书群消息（群里 @机器人 发股票代码用这个，不需要公网回调）\n/feishu            POST，飞书事件回调用（仅在你有公网域名时才需要）\n",
       { headers: { "content-type": "text/plain; charset=utf-8" } },
     );
   },

@@ -17,4 +17,7 @@ BRANCH = "main"
 #   npx wrangler secret put ALERT_WEBHOOK      # 独立的飞书告警机器人 webhook
 #   npx wrangler secret put FEISHU_APP_ID      # 自建应用 App ID（cli_ 开头），「群里发代码查个股」用
 #   npx wrangler secret put FEISHU_APP_SECRET  # 自建应用 App Secret
-#   npx wrangler secret put FEISHU_ENCRYPT_KEY # 可选，仅当飞书开了加密策略
+#   npx wrangler secret put FEISHU_ENCRYPT_KEY # 可选，仅当飞书开了加密策略（事件回调模式才用）
+#
+# 可选变量（[vars] 里加）：FEISHU_CHAT_ID = "oc_xxx"
+#   指定只监听某一个群；不配则自动列出机器人所在的所有群（需要 im:chat:readonly 权限）

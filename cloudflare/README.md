@@ -258,17 +258,36 @@ https://<域名>/feishu/poll
 | `跳过（机器人自己发的）` | 不回自己的消息，避免死循环 |
 | `已在上一轮处理过` | `message_id` 去重生效，正常现象 |
 
+命中之后还有一行 `↳`，说明这一单到底有没有派出去：
+
+```
+      ↳ 已派发 002163
+      ↳ 已派发 002163（回执没发出去：230035 ...）      ← 任务照跑，只是群里没回执
+      ↳ 派发失败：HTTP 401 ...（下一轮重试）            ← 没派出去，不会记去重，下一分钟重试
+```
+
 常见报错对应：
 
-| 报错 | 原因 |
+| 报错 | 原因与解法 |
 | --- | --- |
 | `im/v1/chats 失败 99991672` | 权限没开或没发布版本（`im:chat:readonly`） |
 | `im/v1/messages 失败 99991672` | 缺 `im:message` / `im:message:readonly` / `im:message.history:readonly` 之一；报错正文会列出这三个 |
 | `bot/v3/info 失败 ...` | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 配错 |
 | `扫描群数：0` | 机器人不在任何群里，先拉进群 |
+| **`230035 Send Message Permission deny`** | **群没给机器人发言权限**：群设置 → 群管理 →「谁可以发消息」改成「所有群成员」，或把机器人设为群管理员。注意这是**群**的设置，不是开放平台权限，跟 `im:message:send_as_bot` 无关（单聊能发、群里发不出就是它） |
+| `派发失败：HTTP 401 / 403` | `GH_TOKEN` 过期或缺 `workflow` 权限，去 `/health?check=1` 看 `tokenValid` |
+
+还有一个通道自检端点，逐项验完再决定要不要真发一条：
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-14.6 或更新，确认线上跑的是这版
+curl https://<域名>/feishu/selftest          # 飞书 token / 机器人 / 目标群 / GH token
+curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里发一条自检消息
+```
+
+`?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
+
+```bash
+curl https://<域名>/health            # build 字段应为 2026-11-14.7 或更新，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 

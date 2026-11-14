@@ -33,6 +33,7 @@
  *   GET  /health      档期表与配置状态（?check=1 顺带验 GH_TOKEN）
  *   GET  /test?at=HH:MM  手动触发某档期
  *   GET  /feishu/poll 立刻轮询一次群消息（群里 @机器人 查个股，主用这条）
+ *   GET  /feishu/selftest 通道自检（?send=1 真往群里发一条，用来验发言权限）
  *   POST /feishu      飞书事件回调（仅在拥有公网域名时启用；workers.dev 国内不可达）
  *
  * 群里查个股怎么工作
@@ -56,7 +57,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.6";
+const BUILD = "2026-11-14.7";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -375,6 +376,27 @@ async function feishuToken(env) {
   return feishuTokenCache.token;
 }
 
+// 最近一次失败（回执 / 派发 / 处理异常）。/feishu/poll 会把它打出来，
+// 否则线上只看到「处理 0 条」，然后去翻 /health 和 Cloudflare 日志才知道哪里坏了。
+let lastFailure = { at: 0, where: "", detail: "" };
+
+function noteFailure(where, detail) {
+  const text = String(detail && detail.message ? detail.message : detail || "").slice(0, 300);
+  lastFailure = { at: Date.now(), where, detail: text };
+  console.error(`[FEISHU] ${where}失败：${text}`);
+}
+
+function failureLine() {
+  if (!lastFailure.at) return "";
+  const age = Math.round((Date.now() - lastFailure.at) / 1000);
+  return `⚠️ 最近一次失败：${lastFailure.where} — ${lastFailure.detail}（${age} 秒前）`;
+}
+
+/** 230035 是最常见的坑，直接把解法写在报告里 */
+const HINT_230035 =
+  "（群发言权限被限制：群设置 → 群管理 → 谁可以发消息 → 改成「所有群成员」，或把机器人设为群管理员）";
+
+/** 发一条文本消息，返回结果而不抛错 —— 回执失败不该阻断真正的派发 */
 async function feishuSend(env, chatId, text) {
   try {
     const token = await feishuToken(env);
@@ -388,9 +410,15 @@ async function feishuSend(env, chatId, text) {
       }),
     });
     const data = await res.json();
-    if (data.code !== 0) console.error(`[FEISHU] 回复失败 ${data.code} ${data.msg}`);
+    if (data.code !== 0) {
+      const detail = `${data.code} ${data.msg}${data.code === 230035 ? HINT_230035 : ""}`;
+      noteFailure("回执发送", detail);
+      return { ok: false, detail };
+    }
+    return { ok: true, detail: "" };
   } catch (err) {
-    console.error(`[FEISHU] 回复异常 ${err}`);
+    noteFailure("回执发送", err);
+    return { ok: false, detail: String(err) };
   }
 }
 
@@ -410,12 +438,17 @@ async function dispatchQuery(env, codes, chatId) {
         inputs: { stocks: codes.join(","), period: "90d", chat_id: chatId || "" },
       }),
     });
-    if (res.status === 204) return true;
-    console.error(`[FEISHU] dispatch 失败 HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
-    return false;
+    if (res.status === 204) return { ok: true, detail: "" };
+    const body = (await res.text()).slice(0, 160).replace(/\s+/g, " ");
+    const detail =
+      res.status === 401 || res.status === 403
+        ? `HTTP ${res.status}（GH_TOKEN 过期或无 workflow 权限，去 /health?check=1 校验）${body}`
+        : `HTTP ${res.status} ${body}`;
+    noteFailure("派发 Actions", detail);
+    return { ok: false, detail };
   } catch (err) {
-    console.error(`[FEISHU] dispatch 异常 ${err}`);
-    return false;
+    noteFailure("派发 Actions", err);
+    return { ok: false, detail: String(err) };
   }
 }
 
@@ -454,26 +487,44 @@ async function handleFeishuMessage(env, event) {
   await handleQuery(env, codes, chatId);
 }
 
+// 同一张单子 5 分钟内只通知一次（回执 / ❌ 都算），避免派发连续失败时每分钟刷屏；
+// 失败本身仍会写进 /feishu/poll 报告，不会丢信息。
+const notifyAt = new Map();
+const NOTIFY_GAP_MS = 5 * 60 * 1000;
+
 /**
  * 冷却 + 回执 + 触发。事件回调与轮询两条路径共用，保证行为一致。
+ * 返回 { ok, skipped, receipt, dispatch }，调用方据此决定要不要重试。
  */
 async function handleQuery(env, codes, chatId) {
   const key = codes.join(",");
   const last = seenEvents.get(`q:${key}`) || 0;
   if (Date.now() - last < CODE_COOLDOWN_MS) {
-    await feishuSend(env, chatId, `⏳ ${key} 刚查过，结果约 1 分钟到，请稍等`);
-    return;
+    const receipt = await feishuSend(env, chatId, `⏳ ${key} 刚查过，结果约 1 分钟到，请稍等`);
+    return { ok: true, skipped: "cooldown", receipt, dispatch: { ok: true, detail: "" } };
   }
-  seenEvents.set(`q:${key}`, Date.now());
-  if (seenEvents.size > 200) seenEvents.clear();
 
-  console.log(`[FEISHU] 收到查询 ${key} chat=${chatId}`);
-  await feishuSend(env, chatId, `🔍 已收到 ${key}，正在跑真实数据（估值/资金流/财务），约 1~2 分钟把完整分析发到群里。`);
+  const nkey = `${chatId}|${key}`;
+  const fresh = Date.now() - (notifyAt.get(nkey) || 0) > NOTIFY_GAP_MS;
+  let receipt = { ok: true, detail: "", skipped: true };
 
-  const ok = await dispatchQuery(env, codes, chatId);
-  if (!ok) {
-    await feishuSend(env, chatId, "❌ 触发分析任务失败（GH_TOKEN 可能已过期），请查看 Worker 日志。");
+  if (fresh) {
+    console.log(`[FEISHU] 收到查询 ${key} chat=${chatId}`);
+    // 回执发失败也要继续派发：群里没发出去不代表任务不该跑
+    receipt = await feishuSend(env, chatId, `🔍 已收到 ${key}，正在跑真实数据（估值/资金流/财务），约 1~2 分钟把完整分析发到群里。`);
+    notifyAt.set(nkey, Date.now());
+    if (notifyAt.size > 200) notifyAt.clear();
   }
+
+  const dispatched = await dispatchQuery(env, codes, chatId);
+  if (dispatched.ok) {
+    // 冷却只在真正派发成功后才记，否则失败一次就会把后续重试全挡掉
+    seenEvents.set(`q:${key}`, Date.now());
+    if (seenEvents.size > 200) seenEvents.clear();
+  } else if (fresh) {
+    await feishuSend(env, chatId, `❌ 触发分析任务失败：${dispatched.detail}`);
+  }
+  return { ok: dispatched.ok, skipped: "", receipt, dispatch: dispatched };
 }
 
 // ===== 轮询模式：Worker 主动去群里捞「@机器人 + 6 位代码」 =====
@@ -690,14 +741,28 @@ async function pollFeishu(env) {
         report.push(`    · ${id.slice(-8) || "无id"} ${age}s前 ${v.type}/${v.senderType} 提及=${mt} 代码=${v.codes.join(",") || "无"} → ${verdict}`);
       }
       if (v.skip || seen || !id) continue;
-      pollSeen.set(id, Date.now());
 
-      await handleQuery(env, v.codes, chatId);
-      handled += 1;
+      try {
+        const r = await handleQuery(env, v.codes, chatId);
+        if (r.ok) {
+          pollSeen.set(id, Date.now());
+          handled += 1;
+          const note = r.receipt && r.receipt.ok ? "" : `（回执没发出去：${(r.receipt || {}).detail || "未知"}）`;
+          report.push(`      ↳ ${r.skipped === "cooldown" ? "刚查过，跳过派发" : "已派发"} ${v.codes.join(",")}${note}`);
+        } else {
+          // 不记入 pollSeen，下一轮自动重试
+          report.push(`      ↳ 派发失败：${r.dispatch.detail}（下一轮重试）`);
+        }
+      } catch (err) {
+        noteFailure("处理消息", err);
+        report.push(`      ↳ 处理异常：${err}（下一轮重试）`);
+      }
     }
   }
 
   if (pollSeen.size > 500) pollSeen.clear();
+  const fail = failureLine();
+  if (fail) report.push(fail);
   report.push(`本次处理 ${handled} 条查询`);
   return report.join("\n");
 }
@@ -814,6 +879,46 @@ export default {
       } catch (err) {
         return new Response(`轮询失败：${err}\n`, { status: 500, headers: { "content-type": "text/plain; charset=utf-8" } });
       }
+    }
+
+    // 通道自检：逐项验飞书 token / 机器人 / 群 / GH token，加 ?send=1 再真发一条到群里。
+    // 专门用来把「群没给机器人发言权限（230035）」这类问题当场暴露，不用去翻日志。
+    if (url.pathname === "/feishu/selftest") {
+      const lines = [];
+      const chatId = (url.searchParams.get("chat_id") || env.FEISHU_CHAT_ID || "").trim();
+      try {
+        await feishuToken(env);
+        lines.push("飞书 tenant_access_token：OK");
+      } catch (err) {
+        lines.push(`飞书 tenant_access_token：失败 ${err}`);
+        return new Response(lines.join("\n") + "\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
+      }
+      try {
+        const bot = await feishuBotInfo(env);
+        lines.push(`机器人：${bot.name || "(未命名)"} ${bot.id}`);
+      } catch (err) {
+        lines.push(`机器人信息：失败 ${err}`);
+      }
+      const target = chatId || (await feishuChats(env).catch(() => []))[0] || "";
+      lines.push(`目标群：${target || "（没找到，配置 FEISHU_CHAT_ID 或把机器人拉进群）"}`);
+      try {
+        await authHeaders(env);
+        const res = await fetch(`${API}/user`, { headers: await authHeaders(env) });
+        lines.push(`GitHub token：${res.ok ? "OK" : `失败 HTTP ${res.status}`}`);
+      } catch (err) {
+        lines.push(`GitHub token：失败 ${err}`);
+      }
+      if (url.searchParams.get("send") === "1") {
+        if (!target) {
+          lines.push("发送测试：跳过（没有目标群）");
+        } else {
+          const r = await feishuSend(env, target, "【自检】png推送 发送通道测试，可忽略");
+          lines.push(r.ok ? "发送测试：成功（群里应该多了一条自检消息）" : `发送测试：失败 ${r.detail}`);
+        }
+      } else {
+        lines.push("发送测试：未执行（加 ?send=1 会真的往群里发一条）");
+      }
+      return new Response(lines.join("\n") + "\n", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
 
     if (url.pathname === "/health") {

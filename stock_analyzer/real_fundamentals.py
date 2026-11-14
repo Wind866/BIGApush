@@ -5,9 +5,10 @@
 
 替代 stock_analyzer 里写死的「模拟估值」(pe=price/10、pb=price/5、ps=price/8) 与
 写死的成长率(0.1/0.15)。通过 akshare 拉取：
-  - 实时估值：市盈率(动态)/市净率/市销率/总市值/流通市值
-                主源 stock_individual_info_em(东财 push2)；被限流时兜底
-                stock_zh_valuation_baidu(百度) 补齐总市值+市净率
+  - 实时估值：市盈率(TTM)/市净率/市销率/总市值
+                主源 stock_zh_valuation_baidu(百度，PE(TTM)+PB+总市值，数据中心友好)；
+                东财 push2 会拦截云主机 IP(GitHub Actions)，仅作兜底；
+                PS 由「总市值 ÷ TTM 营业收入(新浪利润表)」计算
   - 财务与成长：营业收入/净利润(stock_financial_report_sina 利润表) +
                  净资产收益率/资产负债率/营收·净利润同比(stock_financial_analysis_indicator)
 
@@ -105,15 +106,19 @@ def _pick(df, *keywords, latest: bool = True) -> Optional[float]:
 
 
 def _baidu_valuation(stock_code: str) -> Dict[str, Any]:
-    """百度估值兜底：总市值 + 市净率（不受东财 push2 行情限流影响）。
+    """百度估值：总市值 + 市净率 + 市盈率(TTM)。
+
+    百度接口对数据中心 IP 友好（东财 push2 会拦截云主机 IP，本项目部署在
+    GitHub Actions 上，故以百度为主源）。指标名必须写成「市盈率(TTM)」，
+    写成「市盈率」/「市盈率ttm」会因为返回结构为空而解析失败。
 
     Returns:
-        dict，可能包含 market_cap(亿) / pb；取不到的键不存在。
+        dict，可能包含 market_cap(元) / pb / pe；取不到的键不存在。
     """
     out: Dict[str, Any] = {}
     try:
         import akshare as ak
-        # 总市值（单位：亿元）
+        # 总市值（百度返回单位：亿元 -> 统一转元）
         mc = _safe(ak.stock_zh_valuation_baidu, symbol=stock_code,
                    indicator="总市值", period="近一年")
         if mc is not None and not mc.empty and "value" in mc.columns:
@@ -127,47 +132,97 @@ def _baidu_valuation(stock_code: str) -> Dict[str, Any]:
             v = _to_float(pb.iloc[-1]["value"])
             if v is not None:
                 out["pb"] = v
+        # 市盈率(TTM)：指标名必须带 (TTM) 后缀，否则百度返回空结构解析失败
+        pe = _safe(ak.stock_zh_valuation_baidu, symbol=stock_code,
+                   indicator="市盈率(TTM)", period="近一年")
+        if pe is not None and not pe.empty and "value" in pe.columns:
+            v = _to_float(pe.iloc[-1]["value"])
+            if v is not None:
+                out["pe"] = v
     except Exception as e:  # noqa: BLE001
-        print(f"[real_fundamentals] 百度估值兜底失败 {stock_code}: {e}")
+        print(f"[real_fundamentals] 百度估值获取失败 {stock_code}: {e}")
     return out
 
 
-def get_real_valuation(stock_code: str) -> Dict[str, Any]:
-    """实时估值：PE(动态)/PB/PS/总市值/流通市值。
+def _ttm_revenue(stock_code: str) -> Optional[float]:
+    """用新浪利润表计算 TTM 营业收入（元）。
 
-    多源兜底策略：
-      1) 主源 东财 stock_individual_info_em（一次给全 PE/PB/PS/总市值/流通市值）；
-         若东财 push2 行情被限流或失败，则
-      2) 兜底 百度 stock_zh_valuation_baidu 补齐 总市值 + 市净率，
-         保证页面至少展示真实市值与 PB；PE/PS 不足时由调用方回退原估算值。
-    所有取值失败均返回空 dict，由调用方回退到既有模拟值，保证页面不崩。
+    算法：TTM = 最近年报 + 本期累计 - 去年同期累计；若最新一期即年报则直接取年报。
+    新浪利润表「报告日」为 YYYYMMDD、「营业总收入」为元，最新一期在 iloc[0]。
+    失败返回 None。
     """
-    # 1) 主源：东财（一次取全四项）
     try:
         import akshare as ak
-        df = _safe(ak.stock_individual_info_em, symbol=stock_code)
-        if df is not None and not df.empty and "item" in df.columns and "value" in df.columns:
-            m = dict(zip(df["item"], df["value"]))
-            out = {}
-            for key, item_name in (("pe", "市盈率"), ("pb", "市净率"), ("ps", "市销率"),
-                                   ("market_cap", "总市值"), ("float_market_cap", "流通市值")):
-                if item_name in m:
-                    # 市值类字段统一转成「元」，其余为比率
-                    val = (_to_money_yuan(m[item_name]) if key in ("market_cap", "float_market_cap")
-                           else _to_float(m[item_name]))
-                    if val is not None:
-                        out[key] = val
-            if out:
-                return out
-        # out 为空（结构不符或全 None）→ 走兜底
+        inc = _safe(ak.stock_financial_report_sina, stock=stock_code, symbol="利润表")
+        if inc is None or inc.empty or "报告日" not in inc.columns:
+            return None
+        rev_col = ("营业总收入" if "营业总收入" in inc.columns
+                   else ("营业收入" if "营业收入" in inc.columns else None))
+        if rev_col is None:
+            return None
+        rows = []
+        for _, r in inc.iterrows():
+            try:
+                d = int(str(r["报告日"]).strip())
+            except Exception:
+                continue
+            v = _to_float(r[rev_col])
+            if v is not None:
+                rows.append((d, v))
+        if not rows:
+            return None
+        rows.sort(reverse=True)
+        latest_d, latest_v = rows[0]
+        if latest_d % 10000 == 1231:            # 最新一期就是年报
+            return latest_v
+        fy = next(((d, v) for d, v in rows if d < latest_d and d % 10000 == 1231), None)
+        prior_d = latest_d - 10000             # 去年同期
+        prior_v = next((v for d, v in rows if d == prior_d), None)
+        if fy and prior_v is not None:
+            return fy[1] + latest_v - prior_v
+        return None
     except Exception as e:  # noqa: BLE001
-        print(f"[real_fundamentals] 东财估值获取失败 {stock_code}: {e}")
+        print(f"[real_fundamentals] TTM 营收计算失败 {stock_code}: {e}")
+        return None
 
-    # 2) 兜底：百度（总市值 + 市净率）
-    fb = _baidu_valuation(stock_code)
-    if fb:
-        return fb
-    return {}
+
+def get_real_valuation(stock_code: str) -> Dict[str, Any]:
+    """实时估值：PE(TTM)/PB/PS/总市值。
+
+    多源策略（适配 GitHub Actions 等数据中心 IP，东财 push2 会拦截云主机请求）：
+      1) 主源 百度 stock_zh_valuation_baidu：PE(TTM) + PB + 总市值，数据中心友好；
+      2) 主源完全取不到时兜底 东财 stock_individual_info_em（本地/住宅 IP 可达）；
+      3) PS 由「总市值 ÷ TTM 营业收入(新浪)」计算，全环境可用；
+         PS 计算失败时不设置该键，由调用方回退原估算值。
+    所有取值失败均返回空 dict，由调用方回退到既有模拟值，保证页面不崩。
+    """
+    # 1) 主源：百度（PE(TTM)/PB/总市值）
+    out = _baidu_valuation(stock_code)
+
+    # 2) 兜底：东财（仅当百度完全取不到时；数据中心 IP 通常失败，故不做首选）
+    if not out:
+        try:
+            import akshare as ak
+            df = _safe(ak.stock_individual_info_em, symbol=stock_code)
+            if df is not None and not df.empty and "item" in df.columns and "value" in df.columns:
+                m = dict(zip(df["item"], df["value"]))
+                for key, item_name in (("pe", "市盈率"), ("pb", "市净率"), ("ps", "市销率"),
+                                       ("market_cap", "总市值"), ("float_market_cap", "流通市值")):
+                    if item_name in m:
+                        val = (_to_money_yuan(m[item_name]) if key in ("market_cap", "float_market_cap")
+                               else _to_float(m[item_name]))
+                        if val is not None:
+                            out[key] = val
+        except Exception as e:  # noqa: BLE001
+            print(f"[real_fundamentals] 东财估值兜底失败 {stock_code}: {e}")
+
+    # 3) PS：市值 / TTM 营收
+    if out.get("ps") is None and out.get("market_cap"):
+        ttm = _ttm_revenue(stock_code)
+        if ttm and ttm > 0:
+            out["ps"] = out["market_cap"] / ttm
+
+    return out
 
 
 def get_real_financials(stock_code: str) -> Dict[str, Any]:

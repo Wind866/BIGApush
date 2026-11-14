@@ -46,6 +46,42 @@ _THS_FF_CACHE: Dict[str, Any] = {"ts": 0.0, "df": None}
 _THS_FF_TTL = 60.0
 
 
+# ---------------------------------------------------------------- 周期换算
+# 分析周期 -> 自然日窗口。注意技术分析要算出 MA200 需要 ≥200 个交易日
+# （约 280+ 自然日），所以长周期窗口必须给足，否则 MA200 恒为 NaN。
+PERIOD_DAYS: Dict[str, int] = {
+    '30d': 30, '60d': 60, '90d': 90, '180d': 180,
+    '400d': 400, '1y': 365, '2y': 730, '3y': 1095,
+}
+DEFAULT_PERIOD_DAYS = 30
+# 支撑 MA200 所需的最少自然日窗口（200 交易日 ≈ 280 自然日，留足余量）
+MA200_MIN_DAYS = 400
+
+
+def period_to_days(period: Any) -> int:
+    """把 '90d' / '1y' / '400d' / 90 这类周期描述换算成自然日天数。"""
+    if isinstance(period, (int, float)) and period > 0:
+        return int(period)
+    key = str(period or '').strip().lower()
+    if key in PERIOD_DAYS:
+        return PERIOD_DAYS[key]
+    try:
+        if key.endswith('d'):
+            return max(1, int(key[:-1]))
+        if key.endswith('y'):
+            return max(1, int(float(key[:-1]) * 365))
+        if key.endswith('m'):
+            return max(1, int(float(key[:-1]) * 30))
+    except ValueError:
+        pass
+    return DEFAULT_PERIOD_DAYS
+
+
+# 巨潮个股概况（名称/行业/市场）进程内缓存，1 小时有效
+_CNINFO_PROFILE_CACHE: Dict[str, Any] = {}
+_CNINFO_PROFILE_TTL = 3600.0
+
+
 def _get_ths_ff_snapshot():
     """获取同花顺全市场即时资金流快照（带 60s 进程内缓存；失败不缓存）。"""
     now = time.time()
@@ -101,53 +137,155 @@ class DataFetcher:
             "000538": "云南白药", "002415": "海康威视", "000725": "京东方A",
         }
     
+    @staticmethod
+    def _market_label(stock_code: str, market_hint: Optional[str] = None) -> str:
+        """推断所属市场（沪市/深市/北交所），优先采用数据源给出的市场字段。"""
+        hint = (market_hint or "").strip()
+        if hint:
+            if "北" in hint:
+                return "北交所"
+            if "沪" in hint or hint.startswith("上"):
+                return "沪市"
+            if "深" in hint:
+                return "深市"
+        code = str(stock_code).strip()
+        if code.startswith(("60", "68", "9")):
+            return "沪市"
+        if code.startswith(("4", "8")):
+            return "北交所"
+        return "深市"
+
+    @staticmethod
+    def _parse_em_basic(stock_info: pd.DataFrame) -> Dict[str, str]:
+        """解析东财 stock_individual_info_em 的两个返回形态。
+
+        - 长表形态（当前 akshare）：列为 item/value，需要按 item 名取值；
+          旧代码直接把 item 列第 0 行当股票名称，取到的是「股票代码」这个标签。
+        - 宽表形态：列名即 股票名称 / 所属行业 / 所属板块。
+        """
+        out = {"name": "", "industry": "", "sector": "", "market": ""}
+        if stock_info is None or stock_info.empty:
+            return out
+
+        if "item" in stock_info.columns and "value" in stock_info.columns:
+            kv = {str(k).strip(): v for k, v in
+                  zip(stock_info["item"], stock_info["value"])}
+            out["name"] = str(kv.get("股票简称") or kv.get("股票名称") or "").strip()
+            out["industry"] = str(kv.get("行业") or kv.get("所属行业") or "").strip()
+            out["sector"] = str(kv.get("所属板块") or kv.get("板块") or "").strip()
+            out["market"] = str(kv.get("所属市场") or "").strip()
+            return out
+
+        def _first(col: str) -> str:
+            if col in stock_info.columns and not stock_info[col].empty:
+                return str(stock_info[col].iloc[0]).strip()
+            return ""
+
+        out["name"] = _first("股票名称") or _first("股票简称")
+        out["industry"] = _first("所属行业") or _first("行业")
+        out["sector"] = _first("所属板块")
+        out["market"] = _first("所属市场")
+        return out
+
+    def _get_cninfo_profile(self, stock_code: str) -> Dict[str, str]:
+        """巨潮资讯个股概况（数据中心 IP 友好），取 简称/行业/市场。
+
+        东财 push2 在云主机/数据中心出口常被拦截，此时用它兜底名称与行业。
+        进程内 1 小时缓存，避免同一请求内重复拉取。
+        """
+        cached = _CNINFO_PROFILE_CACHE.get(stock_code)
+        if cached and (time.time() - cached[0]) < _CNINFO_PROFILE_TTL:
+            return cached[1]
+
+        result: Dict[str, str] = {}
+        try:
+            profile = akshare_call_with_retry(
+                ak.stock_profile_cninfo, cache_ttl=604800, symbol=stock_code
+            )
+            if profile is not None and not profile.empty:
+                row = profile.iloc[0]
+
+                def _val(*keys: str) -> str:
+                    for k in keys:
+                        if k in profile.columns:
+                            v = row.get(k)
+                            if v is not None and str(v).strip() not in ('', 'nan', 'None'):
+                                return str(v).strip()
+                    return ""
+
+                result = {
+                    "name": _val("A股简称", "公司名称"),
+                    "industry": _val("所属行业"),
+                    "market": _val("所属市场"),
+                }
+        except Exception as e:  # noqa: BLE001
+            print(f"巨潮个股概况兜底失败 {stock_code}: {e}")
+
+        _CNINFO_PROFILE_CACHE[stock_code] = (time.time(), result)
+        return result
+
     def get_stock_basic(self, stock_code: str) -> Dict[str, Any]:
-        """获取股票基本信息
-        
+        """获取股票基本信息（名称/行业/板块/市场）
+
+        取数顺序：东财 -> 巨潮资讯 -> 内置名单兜底。
+        东财 push2 在数据中心 IP 下会被拦截，故必须有非东财兜底，
+        否则线上名称会退化成股票代码、行业恒为「未知行业」。
+
         Args:
             stock_code: 股票代码
-            
+
         Returns:
             dict: 股票基本信息
         """
+        code = str(stock_code).strip()
+        fallback_list = getattr(self, 'DEFAULT_STOCK_LIST', {}) or {}
+        basic = {
+            "code": code,
+            "name": "",
+            "industry": "",
+            "sector": "",
+            "market": self._market_label(code),
+            "source": "",
+        }
+
+        # 1) 主源：东财（本地网络正常时字段最全）
         try:
-            # 通过重试包装器从 akshare 获取（缓存TTL 7天，基本信息类）
             stock_info = akshare_call_with_retry(
-                ak.stock_individual_info_em, cache_ttl=604800, symbol=stock_code
+                ak.stock_individual_info_em, cache_ttl=604800, symbol=code
             )
-            if stock_info is not None and not stock_info.empty:
-                # 检查列是否存在
-                name_col = "股票名称" if "股票名称" in stock_info.columns else "item"
-                industry_col = "所属行业" if "所属行业" in stock_info.columns else "item"
-                sector_col = "所属板块" if "所属板块" in stock_info.columns else "item"
-                
-                return {
-                    "code": stock_code,
-                    "name": stock_info.get(name_col, "").iloc[0] if not stock_info.get(name_col).empty else "",
-                    "industry": stock_info.get(industry_col, "").iloc[0] if not stock_info.get(industry_col).empty else "",
-                    "sector": stock_info.get(sector_col, "").iloc[0] if not stock_info.get(sector_col).empty else "",
-                    "market": "沪市" if stock_code.startswith("6") else "深市"
-                }
-            
-            # 如果获取失败，使用默认数据
-            return {
-                "code": stock_code,
-                "name": self.DEFAULT_STOCK_LIST.get(stock_code, stock_code),
-                "industry": "未知行业",
-                "sector": "未知板块",
-                "market": "沪市" if stock_code.startswith("6") else "深市"
-            }
-            
-        except Exception as e:
-            print(f"获取股票基本信息失败: {e}")
-            # 返回默认数据
-            return {
-                "code": stock_code,
-                "name": self.DEFAULT_STOCK_LIST.get(stock_code, stock_code),
-                "industry": "未知行业",
-                "sector": "未知板块",
-                "market": "沪市" if stock_code.startswith("6") else "深市"
-            }
+            em = self._parse_em_basic(stock_info)
+            if em.get("name") or em.get("industry"):
+                basic["name"] = em.get("name", "")
+                basic["industry"] = em.get("industry", "")
+                basic["sector"] = em.get("sector", "")
+                basic["market"] = self._market_label(code, em.get("market"))
+                basic["source"] = "eastmoney"
+        except Exception as e:  # noqa: BLE001
+            print(f"东财基本信息获取失败，改用巨潮兜底: {e}")
+
+        # 2) 兜底：巨潮资讯（数据中心友好）
+        if not basic["name"] or not basic["industry"]:
+            profile = self._get_cninfo_profile(code)
+            if profile:
+                if not basic["name"] and profile.get("name"):
+                    basic["name"] = profile["name"]
+                if not basic["industry"] and profile.get("industry"):
+                    basic["industry"] = profile["industry"]
+                if profile.get("market"):
+                    basic["market"] = self._market_label(code, profile["market"])
+                if not basic["source"]:
+                    basic["source"] = "cninfo"
+
+        # 3) 收口：内置名单 + 占位文案
+        if not basic["name"]:
+            basic["name"] = fallback_list.get(code, code)
+        if not basic["industry"]:
+            basic["industry"] = "未知行业"
+        if not basic["sector"]:
+            basic["sector"] = basic["industry"] if basic["industry"] != "未知行业" else "未知板块"
+        if not basic["source"]:
+            basic["source"] = "builtin"
+        return basic
     
     def get_stock_quote(self, stock_code: str, period: str = 'daily') -> pd.DataFrame:
         """获取历史行情数据
@@ -176,16 +314,7 @@ class DataFetcher:
                 
                 # 计算需要的日期范围
                 end_date = datetime.now()
-                if period == '30d':
-                    start_date = end_date - timedelta(days=30)
-                elif period == '60d':
-                    start_date = end_date - timedelta(days=60)
-                elif period == '90d':
-                    start_date = end_date - timedelta(days=90)
-                elif period == '1y':
-                    start_date = end_date - timedelta(days=365)
-                else:
-                    start_date = end_date - timedelta(days=30)
+                start_date = end_date - timedelta(days=period_to_days(period))
                 
                 # 过滤日期范围
                 filtered_df = local_df[local_df['date'] >= start_date]
@@ -204,16 +333,7 @@ class DataFetcher:
             
             # 计算日期范围
             end_date = datetime.now()
-            if period == '30d':
-                start_date = end_date - timedelta(days=30)
-            elif period == '60d':
-                start_date = end_date - timedelta(days=60)
-            elif period == '90d':
-                start_date = end_date - timedelta(days=90)
-            elif period == '1y':
-                start_date = end_date - timedelta(days=365)
-            else:
-                start_date = end_date - timedelta(days=30)
+            start_date = end_date - timedelta(days=period_to_days(period))
             
             # 格式化日期
             start_date_str = start_date.strftime("%Y%m%d")
@@ -301,11 +421,21 @@ class DataFetcher:
                 )
             
             if financial_data is not None and not financial_data.empty:
+                def _col_first(col: str) -> float:
+                    """取某列最新一期数值；列缺失/为空/无法解析时回落 0。"""
+                    if col not in financial_data.columns or financial_data[col].empty:
+                        return 0.0
+                    try:
+                        val = float(financial_data[col].iloc[-1])
+                    except (TypeError, ValueError):
+                        return 0.0
+                    return 0.0 if val != val else val  # NaN -> 0
+
                 return {
-                    "revenue": float(financial_data.get("营业总收入", 0).iloc[0]) if not financial_data.get("营业总收入").empty else 0,
-                    "profit": float(financial_data.get("净利润", 0).iloc[0]) if not financial_data.get("净利润").empty else 0,
-                    "roe": float(financial_data.get("净资产收益率", 0).iloc[0]) if not financial_data.get("净资产收益率").empty else 0,
-                    "debt_ratio": float(financial_data.get("资产负债率", 0).iloc[0]) if not financial_data.get("资产负债率").empty else 0
+                    "revenue": _col_first("营业总收入"),
+                    "profit": _col_first("净利润"),
+                    "roe": _col_first("净资产收益率"),
+                    "debt_ratio": _col_first("资产负债率"),
                 }
             
             return {"revenue": 0, "profit": 0, "roe": 0, "debt_ratio": 0}

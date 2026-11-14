@@ -5,7 +5,9 @@
 
 替代 stock_analyzer 里写死的「模拟估值」(pe=price/10、pb=price/5、ps=price/8) 与
 写死的成长率(0.1/0.15)。通过 akshare 拉取：
-  - 实时估值：市盈率(动态)/市净率/市销率/总市值/流通市值  (stock_individual_info_em)
+  - 实时估值：市盈率(动态)/市净率/市销率/总市值/流通市值
+                主源 stock_individual_info_em(东财 push2)；被限流时兜底
+                stock_zh_valuation_baidu(百度) 补齐总市值+市净率
   - 财务与成长：营业收入/净利润(stock_financial_report_sina 利润表) +
                  净资产收益率/资产负债率/营收·净利润同比(stock_financial_analysis_indicator)
 
@@ -40,6 +42,29 @@ def _to_float(value: Any) -> Optional[float]:
         if v != v:  # NaN 检测
             return None
         return v
+    except Exception:
+        return None
+
+
+def _to_money_yuan(value: Any) -> Optional[float]:
+    """把 akshare 市值类数值统一转成「元」（前端 fmtMoney 按元展示）。
+
+    东财 stock_individual_info_em 返回如 "17941.92亿" / "1234.56万" 的字符串；
+    百度 stock_zh_valuation_baidu 返回纯数值（单位：亿）。本函数统一换算成元。
+    """
+    if value is None or value == "":
+        return None
+    s = str(value).strip()
+    try:
+        if "亿" in s:
+            return float(s.replace(",", "").replace("亿", "").replace("万", "")) * 1e8
+        if "万" in s:
+            return float(s.replace(",", "").replace("万", "").replace("亿", "")) * 1e4
+        # 百度等纯数值（单位：亿）或已是元的兜底
+        num = float(s.replace(",", ""))
+        if num < 1e6:  # 量级过小，判定为「亿」数值
+            return num * 1e8
+        return num
     except Exception:
         return None
 
@@ -79,32 +104,70 @@ def _pick(df, *keywords, latest: bool = True) -> Optional[float]:
     return None
 
 
+def _baidu_valuation(stock_code: str) -> Dict[str, Any]:
+    """百度估值兜底：总市值 + 市净率（不受东财 push2 行情限流影响）。
+
+    Returns:
+        dict，可能包含 market_cap(亿) / pb；取不到的键不存在。
+    """
+    out: Dict[str, Any] = {}
+    try:
+        import akshare as ak
+        # 总市值（单位：亿元）
+        mc = _safe(ak.stock_zh_valuation_baidu, symbol=stock_code,
+                   indicator="总市值", period="近一年")
+        if mc is not None and not mc.empty and "value" in mc.columns:
+            v = _to_money_yuan(mc.iloc[-1]["value"])
+            if v is not None:
+                out["market_cap"] = v
+        # 市净率
+        pb = _safe(ak.stock_zh_valuation_baidu, symbol=stock_code,
+                   indicator="市净率", period="近一年")
+        if pb is not None and not pb.empty and "value" in pb.columns:
+            v = _to_float(pb.iloc[-1]["value"])
+            if v is not None:
+                out["pb"] = v
+    except Exception as e:  # noqa: BLE001
+        print(f"[real_fundamentals] 百度估值兜底失败 {stock_code}: {e}")
+    return out
+
+
 def get_real_valuation(stock_code: str) -> Dict[str, Any]:
     """实时估值：PE(动态)/PB/PS/总市值/流通市值。
 
-    Returns:
-        dict，可能包含 pe/pb/ps/market_cap/float_market_cap；取不到的键不存在。
+    多源兜底策略：
+      1) 主源 东财 stock_individual_info_em（一次给全 PE/PB/PS/总市值/流通市值）；
+         若东财 push2 行情被限流或失败，则
+      2) 兜底 百度 stock_zh_valuation_baidu 补齐 总市值 + 市净率，
+         保证页面至少展示真实市值与 PB；PE/PS 不足时由调用方回退原估算值。
+    所有取值失败均返回空 dict，由调用方回退到既有模拟值，保证页面不崩。
     """
+    # 1) 主源：东财（一次取全四项）
     try:
         import akshare as ak
         df = _safe(ak.stock_individual_info_em, symbol=stock_code)
-        if df is None or df.empty:
-            return {}
-        # df 形如 item/value 两列
-        if "item" in df.columns and "value" in df.columns:
+        if df is not None and not df.empty and "item" in df.columns and "value" in df.columns:
             m = dict(zip(df["item"], df["value"]))
             out = {}
             for key, item_name in (("pe", "市盈率"), ("pb", "市净率"), ("ps", "市销率"),
                                    ("market_cap", "总市值"), ("float_market_cap", "流通市值")):
                 if item_name in m:
-                    val = _to_float(m[item_name])
+                    # 市值类字段统一转成「元」，其余为比率
+                    val = (_to_money_yuan(m[item_name]) if key in ("market_cap", "float_market_cap")
+                           else _to_float(m[item_name]))
                     if val is not None:
                         out[key] = val
-            return out
-        return {}
+            if out:
+                return out
+        # out 为空（结构不符或全 None）→ 走兜底
     except Exception as e:  # noqa: BLE001
-        print(f"[real_fundamentals] 估值获取失败 {stock_code}: {e}")
-        return {}
+        print(f"[real_fundamentals] 东财估值获取失败 {stock_code}: {e}")
+
+    # 2) 兜底：百度（总市值 + 市净率）
+    fb = _baidu_valuation(stock_code)
+    if fb:
+        return fb
+    return {}
 
 
 def get_real_financials(stock_code: str) -> Dict[str, Any]:

@@ -1,9 +1,8 @@
-name: 验证 · 真实估值取数 (PE/PB/PS/市值)
+name: 验证 · 真实数据取数 (估值/资金流/行情)
 
-# 在 GitHub Actions runner（独立出口 IP，不受本地东财 push2 限流影响）上
-# 真实跑一遍 stock_analyzer.real_fundamentals.get_real_valuation，
-# 确认 PE/PB/PS/总市值 能正常取到真实值。
-# 仅手动触发，不随 push/PR 自动运行。
+# 在 GitHub Actions runner（数据中心 IP）上真实跑一遍数据取数，确认
+# 估值(PE/PB/PS/市值)、资金流、行情(datacenter IP 下东财 push2 会被拦截，
+# 需由百度/同花顺/新浪兜底)均能取到真实值。仅手动触发，不随 push/PR 自动运行。
 on:
   workflow_dispatch:
     inputs:
@@ -56,4 +55,29 @@ jobs:
                   all_ok = False
               print(f"[{status}] {code}: {json.dumps(val, ensure_ascii=False, default=str)}")
           print("RESULT:", "ALL_REAL_PE_PS" if all_ok else "PE_OR_PS_MISSING")
+          PY
+
+      - name: 资金流 + 行情兜底验证
+        run: |
+          python - <<'PY'
+          import json, sys
+          sys.path.insert(0, '.')
+          from stock_analyzer.data_fetcher import DataFetcher
+
+          f = DataFetcher()
+          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          ff_ok = 0
+          q_ok = 0
+          for code in codes:
+              ff = f.get_fund_flow(code)
+              q = f.get_stock_quote(code, "60d")
+              if ff.get("main_inflow"):
+                  ff_ok += 1
+              rows = 0 if q is None else len(q)
+              if rows > 0:
+                  q_ok += 1
+              print(f"[FF] {code}: {json.dumps(ff, ensure_ascii=False, default=str)}")
+              print(f"[Q ] {code}: rows={rows}")
+          print("RESULT_FF:", f"{ff_ok}/{len(codes)} 有资金流")
+          print("RESULT_Q :", f"{q_ok}/{len(codes)} 有行情")
           PY

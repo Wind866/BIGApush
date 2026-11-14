@@ -20,6 +20,26 @@ from utils.db_manager import DBManager
 from utils.akshare_retry import akshare_call_with_retry
 
 
+def _parse_cn_money(value: Any) -> Optional[float]:
+    """把 '5.42亿' / '5416.94万' / '1.23' 这类中文金额字符串解析为「元」(float)。
+
+    同花顺资金流返回的是带单位的中文金额字符串；解析失败返回 None。
+    """
+    if value is None:
+        return None
+    t = str(value).strip().replace(',', '')
+    if t in ('', '-', '--'):
+        return None
+    try:
+        if t.endswith('亿'):
+            return float(t[:-1]) * 1e8
+        if t.endswith('万'):
+            return float(t[:-1]) * 1e4
+        return float(t)
+    except Exception:
+        return None
+
+
 class DataFetcher:
     """数据获取器"""
     
@@ -118,8 +138,15 @@ class DataFetcher:
         local_df = pd.DataFrame(columns=['date', 'open', 'close', 'high', 'low', 'volume', 'amount'])
         
         try:
-            # 1. 优先从本地读取数据
-            local_df = self.csv_manager.read_stock(stock_code)
+            # 1. 优先从本地读取数据（csv_manager 可选，未配置则跳过本地缓存）
+            local_df = pd.DataFrame()
+            _csv = getattr(self, 'csv_manager', None)
+            if _csv is not None:
+                try:
+                    local_df = _csv.read_stock(stock_code)
+                except Exception as csv_err:  # noqa: BLE001
+                    print(f"读取本地行情缓存失败，忽略: {csv_err}")
+                    local_df = pd.DataFrame()
             if not local_df.empty:
                 print(f"从本地获取 {stock_code} 历史数据: {len(local_df)} 条")
                 
@@ -168,16 +195,32 @@ class DataFetcher:
             start_date_str = start_date.strftime("%Y%m%d")
             end_date_str = end_date.strftime("%Y%m%d")
             
-            # 尝试从akshare获取
-            if stock_code.startswith("6"):
-                # 沪市股票
-                data = ak.stock_zh_a_hist(symbol=stock_code, start_date=start_date_str, end_date=end_date_str)
-            else:
-                # 深市股票
-                data = ak.stock_zh_a_hist(symbol=stock_code, start_date=start_date_str, end_date=end_date_str)
-            
-            # 重命名列
-            if not data.empty:
+            # 1) 主源：东财 push2his（数据中心 IP 常被拦截，失败则回退新浪）
+            data = None
+            try:
+                data = ak.stock_zh_a_hist(symbol=stock_code, start_date=start_date_str,
+                                          end_date=end_date_str)
+            except Exception as em_err:  # noqa: BLE001
+                print(f"东财行情获取失败，尝试新浪兜底: {em_err}")
+
+            # 2) 兜底：新浪 stock_zh_a_daily（数据中心友好，英文列名 date/open/high/low/close/volume/amount）
+            if data is None or data.empty:
+                sina_sym = ("sh" if stock_code.startswith("6") else "sz") + stock_code
+                try:
+                    sina_df = ak.stock_zh_a_daily(symbol=sina_sym, start_date=start_date_str,
+                                                  end_date=end_date_str, adjust="")
+                    if sina_df is not None and not sina_df.empty:
+                        data = sina_df[["date", "open", "high", "low", "close",
+                                        "volume", "amount"]].copy()
+                        data["date"] = pd.to_datetime(data["date"])
+                        data = data.sort_values("date")
+                        print(f"已用新浪兜底获取 {stock_code} 行情: {len(data)} 条")
+                        return data
+                except Exception as sina_err:  # noqa: BLE001
+                    print(f"新浪行情兜底也失败: {sina_err}")
+
+            # 3) 东财列重命名 + 落本地缓存
+            if data is not None and not data.empty:
                 data = data.rename(columns={
                     "日期": "date",
                     "开盘": "open",
@@ -191,12 +234,17 @@ class DataFetcher:
                 data['date'] = pd.to_datetime(data['date'])
                 # 按日期排序
                 data = data.sort_values('date')
-                
-                # 保存到本地
-                self.csv_manager.update_stock(stock_code, data)
-                print(f"已保存 {stock_code} 历史数据到本地")
-            
-            return data
+
+                # 保存到本地（csv_manager 可选）
+                if getattr(self, 'csv_manager', None) is not None:
+                    try:
+                        self.csv_manager.update_stock(stock_code, data)
+                        print(f"已保存 {stock_code} 历史数据到本地")
+                    except Exception as csv_err:  # noqa: BLE001
+                        print(f"保存本地行情缓存失败，忽略: {csv_err}")
+
+            return data if data is not None else pd.DataFrame(
+                columns=['date', 'open', 'close', 'high', 'low', 'volume', 'amount'])
             
         except Exception as e:
             print(f"获取历史行情数据失败: {e}")
@@ -253,32 +301,53 @@ class DataFetcher:
             dict: 资金流向数据
         """
         try:
-            # 通过重试包装器从 akshare 获取资金流向
-            fund_flow = akshare_call_with_retry(
-                ak.stock_individual_fund_flow, stock=stock_code
-            )
-            
-            if fund_flow is not None and not fund_flow.empty:
-                # 获取主力净流入
-                main_inflow = 0
-                if "主力净流入" in fund_flow.columns:
-                    main_inflow = fund_flow.get("主力净流入", 0).iloc[0] if not fund_flow.get("主力净流入").empty else 0
-                
-                # 获取成交量变化
-                volume_change = "稳定"
-                if "成交量" in fund_flow.columns and len(fund_flow) >= 2:
-                    current_volume = fund_flow.get("成交量", 0).iloc[0] if not fund_flow.get("成交量").empty else 0
-                    prev_volume = fund_flow.get("成交量", 0).iloc[1] if not fund_flow.get("成交量").empty else 0
-                    volume_change = "增加" if current_volume > prev_volume else "减少"
-                
-                return {
-                    "main_inflow": float(main_inflow) if main_inflow is not None else 0,
-                    "north_inflow": 0,  # akshare暂时没有北向资金数据
-                    "volume_change": volume_change
-                }
-            
+            # 1) 主源：东财个股资金流（数据中心 IP 常被拦截）
+            fund_flow = None
+            try:
+                fund_flow = akshare_call_with_retry(
+                    ak.stock_individual_fund_flow, stock=stock_code
+                )
+                if fund_flow is not None and not fund_flow.empty:
+                    # 获取主力净流入
+                    main_inflow = 0
+                    if "主力净流入" in fund_flow.columns:
+                        main_inflow = fund_flow.get("主力净流入", 0).iloc[0] if not fund_flow.get("主力净流入").empty else 0
+
+                    # 获取成交量变化
+                    volume_change = "稳定"
+                    if "成交量" in fund_flow.columns and len(fund_flow) >= 2:
+                        current_volume = fund_flow.get("成交量", 0).iloc[0] if not fund_flow.get("成交量").empty else 0
+                        prev_volume = fund_flow.get("成交量", 0).iloc[1] if not fund_flow.get("成交量").empty else 0
+                        volume_change = "增加" if current_volume > prev_volume else "减少"
+
+                    return {
+                        "main_inflow": float(main_inflow) if main_inflow is not None else 0,
+                        "north_inflow": 0,  # akshare暂时没有北向资金数据
+                        "volume_change": volume_change
+                    }
+            except Exception as em_err:  # noqa: BLE001
+                print(f"东财资金流获取失败，尝试同花顺兜底: {em_err}")
+
+            # 2) 兜底：同花顺即时资金流（数据中心友好；全市场快照按代码取「净额」）
+            try:
+                ths = akshare_call_with_retry(ak.stock_fund_flow_individual, symbol="即时")
+                if ths is not None and not ths.empty and "股票代码" in ths.columns:
+                    codes = ths["股票代码"].astype(str).str.zfill(6)
+                    row = ths[codes == str(stock_code).zfill(6)]
+                    if not row.empty:
+                        net = _parse_cn_money(row.iloc[0].get("净额"))
+                        if net is not None:
+                            print(f"同花顺兜底资金流 {stock_code}: 净额={net:,.0f} 元")
+                            return {
+                                "main_inflow": float(net),
+                                "north_inflow": 0,
+                                "volume_change": "稳定"
+                            }
+            except Exception as ths_err:  # noqa: BLE001
+                print(f"同花顺资金流兜底也失败: {ths_err}")
+
             return {"main_inflow": 0, "north_inflow": 0, "volume_change": "稳定"}
-            
+
         except Exception as e:
             print(f"获取资金流向数据失败: {e}")
             return {"main_inflow": 0, "north_inflow": 0, "volume_change": "稳定"}

@@ -119,6 +119,27 @@ def fetch_market_snapshot():
     return snap.rows, snap.quote_ts, snap.source, snap
 
 
+def crosscheck_limit_up(overview: dict) -> None:
+    """降级口径下用东财涨停池交叉校验「涨停家数」，结果写进容灾轨迹。
+
+    东财 push2 行情被拦时，涨停池（push2ex）往往是唯一还通的通道——正好用来
+    验证备用源的家数靠不靠谱。对不上就如实写出来，不假装降级口径和东财一致。
+    """
+    local = int(overview.get("limit_up") or 0)
+    try:
+        remote, day_txt = bs.em_limit_up_count()
+    except Exception as exc:  # noqa: BLE001 - 交叉校验失败不影响主流程
+        print(f"::warning::东财涨停池交叉校验不可用：{type(exc).__name__} {str(exc)[:80]}")
+        return
+
+    diff = abs(remote - local) / max(1, remote)
+    note = (f"交叉校验：东财涨停池 {remote} 家（{day_txt or '当日'}），"
+            f"本池按涨幅判定 {local} 家")
+    note += "，一致" if diff <= 0.2 else f"，差异 {diff:.0%}（降级源覆盖不全，看趋势别抠绝对值）"
+    overview.setdefault("notes", []).append(note)
+    print(f"          · {note}")
+
+
 def is_limit_up(code: str, pct: float, name: str) -> bool:
     """按板块区分涨停阈值（ST 5%、主板 10%、双创 20%）。"""
     if "ST" in name.upper() or "退" in name:
@@ -424,8 +445,11 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
             f"（涨幅/量比/换手/成交额/流通市值），{extra}"
             "不含行业共振，分数不可与历史东财口径直接比较。</font>"}})
         if overview.get("notes"):
+            # 只展示前三条 + 交叉校验：全列出来在卡片上会挤成一坨，但结论性的一条不能丢
+            notes_all = overview["notes"]
+            picked = notes_all[:3] + [n for n in notes_all[3:] if n.startswith("交叉校验")]
             elements.append({"tag": "note", "elements": [{"tag": "plain_text",
-                "content": "容灾轨迹：" + "；".join(overview["notes"][:3])}]})
+                "content": "容灾轨迹：" + "；".join(picked)}]})
     src_note = (
         "数据来源：东方财富实时行情（多域名容灾）｜评分：涨幅/量比/换手/主力资金/超大单/板块共振/市值加权。"
         "主力资金为按成交单笔金额推断的统计量，非席位真实资金。"
@@ -609,6 +633,9 @@ def main() -> int:
         print("❌ 未取到实时行情数据（全部数据源失效）")
         return 1
     pool, overview = build_pool(rows, source, snap)
+    # 降级口径的涨停家数是按涨幅阈值判的，用东财涨停池（push2ex）核一下
+    if not overview.get("has_fund"):
+        crosscheck_limit_up(overview)
     print(
         f"[数据源] {overview['source_label']} · 口径 {source} / 质量 {overview['quality']}"
         f"（{'完整资金' if overview['has_fund'] else '量价降级'}）"

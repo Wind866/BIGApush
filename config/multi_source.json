@@ -8,5 +8,6 @@
   "sina": true,
   "tencent": true,
   "sina_flow_backfill": true,
-  "news": true
+  "news": true,
+  "eastmoney_probe": true
 }

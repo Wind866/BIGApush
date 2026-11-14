@@ -74,6 +74,7 @@ DEFAULTS: dict[str, Any] = {
     "tencent": True,
     "sina_flow_backfill": True,
     "news": True,
+    "eastmoney_probe": True,
 }
 CFG: dict[str, Any] = dict(DEFAULTS)
 CONFIG_PATH = os.path.join(
@@ -100,7 +101,7 @@ def configure(cfg: dict | None = None) -> dict:
         except (OSError, ValueError) as exc:
             print(f"⚠️ 数据源配置读取失败，使用默认值：{exc}")
     for key in ("eastmoney", "eastmoney_clist", "ths", "sina", "tencent",
-                "sina_flow_backfill", "news"):
+                "sina_flow_backfill", "news", "eastmoney_probe"):
         env = os.environ.get("BIGA_SOURCE_" + key.upper())
         if env is not None:
             CFG[key] = env.strip().lower() not in ("0", "false", "off", "no")
@@ -127,6 +128,63 @@ class Snapshot:
 
 def _now_ts() -> int:
     return int(dt.datetime.now(BJ).timestamp())
+
+
+# ---------------------------------------------------------------------------
+# 东财通道探针（熔断）
+# ---------------------------------------------------------------------------
+
+# 东财 push2 对部分出口 IP 不是「超时」而是「直接 RST」：4 个域名 × 8 秒 × 2 次重试
+# 全跑完要几十秒，而结论早在第一个请求就已经确定了。这里先用一个最小请求探一次，
+# 不通就整轮跳过东财，把等待时间从几十秒压到 2 秒。
+EM_PROBE_TTL = 300.0
+_EM_PROBE: dict[str, Any] = {"ok": None, "at": 0.0, "detail": ""}
+
+
+def em_probe(timeout: float = 2.5, force: bool = False) -> tuple[bool, str]:
+    """探测东财行情通道是否可达，返回 (可用?, 说明)。
+
+    结论在进程内缓存 5 分钟（``force=True`` 可强制重探）：盘中一次运行只需要
+    一次真实探测，后续调用直接吃缓存，不会每页都付一次代价。
+    """
+    if not CFG.get("eastmoney_probe", True):
+        return True, "探针已关闭，按配置直接尝试东财"
+    now = time.time()
+    if not force and _EM_PROBE["ok"] is not None and now - _EM_PROBE["at"] < EM_PROBE_TTL:
+        return bool(_EM_PROBE["ok"]), str(_EM_PROBE["detail"])
+
+    host = EM_HOSTS[0]
+    url = f"{host}/api/qt/stock/get?secid=1.000001&ut={UT}&fields=f43"
+    try:
+        data = s.http_json(url, referer=s.EM_REFERER, timeout=timeout, retries=1)
+        quote = (data.get("data") or {}).get("f43")
+        ok = quote not in (None, "", "-", 0)
+        detail = "指数报价正常" if ok else "返回空报价"
+    except Exception as exc:  # noqa: BLE001 - 探针失败即视为不可用
+        ok = False
+        detail = f"{type(exc).__name__}: {str(exc)[:60]}"
+    _EM_PROBE.update({"ok": ok, "at": now, "detail": detail})
+    print(f"[数据源] 东财行情通道{'可达' if ok else '不可达'}（{detail}）")
+    return ok, detail
+
+
+def reset_probe() -> None:
+    """清掉探针缓存（测试与自检用，避免上一轮结论污染下一轮）。"""
+    _EM_PROBE.update({"ok": None, "at": 0.0, "detail": ""})
+
+
+def em_limit_up_count(day: dt.date | None = None,
+                      timeout: float = 4.0) -> tuple[int, str]:
+    """东财涨停池家数，返回 (家数, 数据日期)。
+
+    涨停池走 push2ex，与 push2 行情通道不是同一组域名：行情被拦时它常常还通，
+    所以降级口径下的「涨停家数」用它做交叉校验，比单靠涨幅阈值判定可信。
+    拿不到就抛错，由调用方决定是否写进容灾轨迹。
+    """
+    day = day or dt.datetime.now(BJ).date()
+    pool = s.em_fetch_pool("ZT", day, timeout=timeout)
+    items = pool.get("items") or []
+    return int(pool.get("total") or len(items)), str(pool.get("qdate") or "")
 
 
 def _row(code: str, name: str, ts: int) -> dict:
@@ -361,12 +419,19 @@ def fetch_snapshot(scan_floor: float = 2.0, max_pages: int = 20,
     configure(cfg)
     s.HEALTH.reset()
     day = dt.datetime.now(BJ).date()
+    notes: list[str] = []
     providers: list[s.Provider] = []
+
+    # 先探一次东财：不通就别把「不可用」放大成几十秒的域名轮询
+    em_ok, em_detail = em_probe() if CFG.get("eastmoney", True) else (False, "东财已按配置停用")
     if CFG.get("eastmoney", True):
-        providers.append(s.Provider(
-            "eastmoney", "东方财富实时榜单（含主力资金）", "full",
-            "push2.eastmoney.com · clist 多域名",
-            lambda: em_strong_stocks(scan_floor, max_pages)))
+        if em_ok:
+            providers.append(s.Provider(
+                "eastmoney", "东方财富实时榜单（含主力资金）", "full",
+                "push2.eastmoney.com · clist 多域名",
+                lambda: em_strong_stocks(scan_floor, max_pages)))
+        else:
+            notes.append(f"东财通道熔断，本轮跳过该源（{em_detail}）；改用腾讯/新浪补字段")
     if CFG.get("sina", True):
         providers.append(s.Provider(
             "sina", "新浪财经全市场涨幅榜（量价）", "minimal",
@@ -384,20 +449,21 @@ def fetch_snapshot(scan_floor: float = 2.0, max_pages: int = 20,
                   lambda v: f"{len(v[0])} 只强势股 / 时点 {v[1]}")
     rows, quote_ts = out.value
     source, quality = out.provider, out.quality
-    notes = [f"候选池来源：{out.label}"]
+    notes.append(f"候选池来源：{out.label}")
     comparable = source == "eastmoney"
 
     if quality != "full":
-        # 1) 优先用东财 ulist.np 换回完整口径（榜单通道挂了不代表行情通道也挂）
-        try:
-            upgraded, coverage = em_upgrade(rows)
-            if coverage >= 0.5:
-                rows, source, quality, comparable = upgraded, "eastmoney", "full", True
-                notes.append(f"东财 ulist.np 补齐 {coverage:.0%} 只完整字段（含资金），恢复同口径评分")
-            else:
-                notes.append(f"东财行情通道覆盖率仅 {coverage:.0%}，保持备用口径")
-        except Exception as exc:  # noqa: BLE001
-            notes.append(f"东财行情通道不可用（{type(exc).__name__}），改用跨供应商补齐")
+        # 1) 东财通的时候才值得用 ulist.np 换回完整口径（榜单挂了不等于行情挂了）
+        if em_ok:
+            try:
+                upgraded, coverage = em_upgrade(rows)
+                if coverage >= 0.5:
+                    rows, source, quality, comparable = upgraded, "eastmoney", "full", True
+                    notes.append(f"东财 ulist.np 补齐 {coverage:.0%} 只完整字段（含资金），恢复同口径评分")
+                else:
+                    notes.append(f"东财行情通道覆盖率仅 {coverage:.0%}，保持备用口径")
+            except Exception as exc:  # noqa: BLE001
+                notes.append(f"东财行情通道不可用（{type(exc).__name__}），改用跨供应商补齐")
         if CFG.get("tencent", True):
             n = tencent_patch(rows)
             if n:
@@ -427,15 +493,17 @@ def fetch_snapshot(scan_floor: float = 2.0, max_pages: int = 20,
 def fetch_index_timestamp() -> tuple[int, str]:
     """返回 (行情时间戳, 来源说明)；全部失败时抛错，由调用方保守放行。"""
     last: Exception | None = None
-    for host in EM_HOSTS:
-        try:
-            url = f"{host}/api/qt/stock/get?secid=1.000001&ut={UT}&fields=f43,f86"
-            data = s.http_json(url, referer=s.EM_REFERER, timeout=6, retries=1)
-            ts = int((data.get("data") or {}).get("f86") or 0)
-            if ts > 1_000_000_000:
-                return ts, f"东财指数时间戳（{host.split('//')[-1]}）"
-        except Exception as exc:  # noqa: BLE001
-            last = exc
+    # 东财被拦时不该逐个域名硬撞 4 次：探针判死就直接走腾讯
+    if em_probe(timeout=2.0)[0]:
+        for host in EM_HOSTS:
+            try:
+                url = f"{host}/api/qt/stock/get?secid=1.000001&ut={UT}&fields=f43,f86"
+                data = s.http_json(url, referer=s.EM_REFERER, timeout=6, retries=1)
+                ts = int((data.get("data") or {}).get("f86") or 0)
+                if ts > 1_000_000_000:
+                    return ts, f"东财指数时间戳（{host.split('//')[-1]}）"
+            except Exception as exc:  # noqa: BLE001
+                last = exc
     try:
         text = s.http_text("https://qt.gtimg.cn/q=sh000001",
                            referer=s.TENCENT_REFERER, encoding="gbk",

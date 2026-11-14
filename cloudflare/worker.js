@@ -35,6 +35,11 @@
 
 const API = "https://api.github.com";
 
+// 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
+// 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
+// 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
+const BUILD = "2026-11-14.1";
+
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
 const PLAN = [
@@ -202,6 +207,57 @@ async function runSlot(env, slot, bj) {
   return text;
 }
 
+/** 该档期在计划时刻 ±10 分钟内是否已经留下过 dispatch 记录。
+ *  查不到 API 时一律返回 true（当作已触发），宁可漏补也不重复推送。 */
+async function firedNearSlot(env, headers, owner, target, slot, bj) {
+  const [repo, workflow] = target.split("/");
+  const planned = Date.parse(`${bj.date}T${slot.at}:00+08:00`);
+  if (Number.isNaN(planned)) return true;
+  try {
+    const res = await fetch(
+      `${API}/repos/${owner}/${repo}/actions/workflows/${workflow}/runs?per_page=20`,
+      { headers },
+    );
+    if (!res.ok) return true;
+    const data = await res.json();
+    return (data.workflow_runs || []).some(
+      (r) => r.event === "workflow_dispatch" &&
+        Math.abs(new Date(r.created_at).getTime() - planned) <= 10 * 60 * 1000,
+    );
+  } catch {
+    return true;
+  }
+}
+
+/** 补档：CF 偶发丢弃某次唤醒时，每 5 分钟回看刚过去 2~7 分钟的档期并补触发。
+ *  不依赖 KV / D1，判重直接查 Actions API；正常触发过的档期不会重复发。 */
+async function catchUp(env, bj) {
+  let headers;
+  try {
+    headers = await authHeaders(env);
+  } catch {
+    return;
+  }
+  const owner = (env.OWNER || "Wind866").trim();
+  const branch = (env.BRANCH || "main").trim();
+  const nowMin = Number(bj.hhmm.slice(0, 2)) * 60 + Number(bj.hhmm.slice(3));
+
+  for (const slot of PLAN) {
+    if (!matches(slot, bj)) continue;
+    const [h, m] = slot.at.split(":").map(Number);
+    const age = nowMin - (h * 60 + m);
+    if (age < 2 || age > 7) continue;
+    for (const target of slot.targets) {
+      if (await firedNearSlot(env, headers, owner, target, slot, bj)) continue;
+      const out = await dispatchOne(env, headers, owner, branch, target, slot);
+      console.log(`[CATCH-UP] ${bj.date} ${slot.at} ${target} → ${out}`);
+      if (out.startsWith("❌")) {
+        await notify(env, `${bj.date} ${slot.at} ${slot.name} 补档失败：${out}`);
+      }
+    }
+  }
+}
+
 /** 每天 08:00 主动验一次 token，避免 PAT 过期后「静默不推」好几天才发现 */
 async function tokenSelfCheck(env) {
   try {
@@ -231,7 +287,17 @@ function json(obj, status = 200) {
 
 export default {
   async scheduled(event, env, ctx) {
-    const bj = beijingNow(Date.now());
+    // 必须用 cron 的计划时刻，不能用 Date.now()：Worker 冷启动 / CF 调度抖动
+    // 会让实际执行落进下一分钟，而档期是精确到 HH:MM 的字符串比对，
+    // 一跨分钟就永久错过该档期（08:43 档期无运行记录的根因）。
+    const plannedMs = Number(event.scheduledTime) || Date.now();
+    const bj = beijingNow(plannedMs);
+
+    const driftSec = Math.round(Math.abs(Date.now() - plannedMs) / 1000);
+    if (driftSec > 120) {
+      ctx.waitUntil(notify(env,
+        `CF cron 执行偏差 ${driftSec}s（计划 ${bj.date} ${bj.hhmm}）；已按计划时刻匹配档期`));
+    }
 
     // 每日令牌自检（不占用 cron 额度，就是每分钟唤醒里的一分钟）
     if (bj.hhmm === "08:00") {
@@ -239,8 +305,15 @@ export default {
     }
 
     const hit = PLAN.find((s) => s.at === bj.hhmm && matches(s, bj));
-    if (!hit) return; // 绝大多数分钟在这里直接结束，零网络请求
-    ctx.waitUntil(runSlot(env, hit, bj));
+    if (hit) {
+      ctx.waitUntil(runSlot(env, hit, bj));
+      return;
+    }
+
+    // 每 5 分钟做一次补档回看。绝大多数分钟仍然零网络请求。
+    if (Number(bj.hhmm.slice(3)) % 5 === 0) {
+      ctx.waitUntil(catchUp(env, bj));
+    }
   },
 
   async fetch(req, env) {
@@ -258,6 +331,8 @@ export default {
       }
       return json({
         ok: true,
+        build: BUILD,
+        cronExpected: "* * * * *",
         owner: (env.OWNER || "Wind866").trim(),
         branch: (env.BRANCH || "main").trim(),
         slots: PLAN.length,
@@ -265,7 +340,7 @@ export default {
         schedule: PLAN.map((s) => `${s.at} ${s.name} [${s.targets.length}]`),
         tokenValid,
         alertConfigured: Boolean((env.ALERT_WEBHOOK || "").trim()),
-        note: "根路径不会触发任务；用 /test?at=HH:MM 手动测试某个档期，/health?check=1 校验 token",
+        note: "根路径不会触发任务；/test?at=HH:MM 手动测某档期，/health?check=1 校验 token；build 字段用于核对线上是否为此版代码",
       });
     }
 

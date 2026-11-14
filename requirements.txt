@@ -1,7 +1,13 @@
-# 定时任务实际会用到的依赖；统一加主版本上界，避免上游 breaking change 打断每日推送。
-# 说明：flask / flask-socketio / schedule / matplotlib / scipy / fastdtw /
-# beautifulsoup4 / lxml 是原 KHunter 项目的 Web 界面与回测遗留，GitHub Actions
-# 只跑 main.py init / run 与几个标准库脚本，不会加载它们；后续可安全精简。
+# 统一加主版本上界，避免上游 breaking change 打断每日推送。
+#
+# 2026-11-14 复核结论（修正此前「8 个依赖是遗留、可安全精简」的说法）：
+#   从 main.py 做静态导入闭包分析，可达 97 个本地模块；flask / flask-socketio /
+#   schedule / matplotlib / scipy / fastdtw / Pillow 都在这条链上被引用
+#   （部分是函数内延迟 import），贸然删除会让 main.py run 在运行时崩掉。
+#   beautifulsoup4 / lxml 未发现直接引用，但 akshare 会把它们作为传递依赖装上，
+#   删掉显式声明也省不了多少安装时间。
+# 真要收敛构建时长，需先用 `python -X importtime main.py run` 做运行时追踪，
+# 确认真实执行路径上未加载的包，再分批移除并跑通 CI。当前保持全量安装。
 akshare>=1.11.0,<2
 pandas>=2.0.0,<3
 numpy>=1.24.0,<3

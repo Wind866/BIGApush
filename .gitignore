@@ -12,6 +12,8 @@ data/scheduler.log
 # 本地定时兜底 / 数据源体检产物
 data/.scheduler_state.json
 sources-health.json
+# 每日档期对账产物，只走 artifact，不入库
+docs/schedule-audit.md
 
 # Python
 __pycache__/
@@ -21,7 +23,8 @@ __pycache__/
 venv/
 
 # 临时文件
-test_*.py
+# 注意：不要忽略 test_*.py / tests/ —— 之前这条规则让测试文件根本提交不上来，
+# 三个项目因此长期零测试。CI 门禁依赖 tests/ 目录入库。
 *.tmp
 .DS_Store
 Thumbs.db

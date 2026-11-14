@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
 from utils.technical import REF, MA, calculate_daily_return
+from utils.market_cap import to_yi  # 市值统一口径：元 → 亿元，未知返回 None
 
 
 class MultiPartyCannonStrategy(BaseStrategy):
@@ -368,7 +369,7 @@ class MultiPartyCannonStrategy(BaseStrategy):
                 'close': round(third_candle['close'], 2),
                 'J': round(third_candle['J'], 2),
                 'volume_ratio': round(volume_expand_ratio, 2),
-                'market_cap': round(third_candle['market_cap'] / 1e8, 2),
+                'market_cap': to_yi(third_candle.get('market_cap')),
                 'short_term_trend': round(third_candle['short_term_trend'], 2),
                 'bull_bear_line': round(third_candle['bull_bear_line'], 2),
                 'key_date': key_date_str,

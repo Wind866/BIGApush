@@ -8,7 +8,10 @@
 #   删掉显式声明也省不了多少安装时间。
 # 真要收敛构建时长，需先用 `python -X importtime main.py run` 做运行时追踪，
 # 确认真实执行路径上未加载的包，再分批移除并跑通 CI。当前保持全量安装。
-akshare>=1.11.0,<2
+# akshare 只锁大版本时被上游改接口打过脸：stock_zh_valuation_baidu 的指标名
+# 从「市盈率」改成「市盈率(TTM)」、部分接口悄悄下线（新浪 newSinaGN.php 已 404）。
+# 收到小版本上界，升级必须走 PR + verify-valuation 工作流复验真实取数。
+akshare>=1.20.0,<1.21
 pandas>=2.0.0,<3
 numpy>=1.24.0,<3
 requests>=2.31.0,<3

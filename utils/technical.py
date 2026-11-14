@@ -89,7 +89,9 @@ def FINANCE(df, field_code):
     39: 总市值（注意：原通达信39是流通市值，本项目使用总市值）
     """
     if field_code == 39:
-        return df.get('market_cap', pd.Series([0] * len(df), index=df.index))
+        # 市值缺失时给 NaN 而不是 0：0 会被 `FINANCE(39) < x` 这类条件当成「小盘股」放进来，
+        # NaN 参与比较恒为 False，最多让该股票不通过筛选，不会造成假信号。
+        return df.get('market_cap', pd.Series([float('nan')] * len(df), index=df.index))
     return pd.Series([0] * len(df), index=df.index)
 
 

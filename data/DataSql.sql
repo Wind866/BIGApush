@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     list_date TEXT,
     -- list_date: 上市日期，类型TEXT，可选，格式YYYY-MM-DD
     market_cap REAL,
-    -- market_cap: 市值，类型REAL，可选，单位亿元，例如100.5
+    -- market_cap: 总市值，类型REAL，可选，单位「元」，例如 1.7941e11；取不到写 NULL 而非 0
     update_time TEXT DEFAULT CURRENT_TIMESTAMP
     -- update_time: 更新时间，类型TEXT，默认当前时间，格式YYYY-MM-DD HH:MM:SS
 );
@@ -435,7 +435,7 @@ CREATE TABLE IF NOT EXISTS stock_kline (
     volume INTEGER,
     -- volume: 成交量，类型INTEGER，可选，例如1000000
     market_cap REAL,
-    -- market_cap: 市值，类型REAL，可选，单位亿元，例如100.5
+    -- market_cap: 总市值，类型REAL，可选，单位「元」，例如 1.7941e11；取不到写 NULL 而非 0
     K REAL,
     -- K: KDJ指标K值，类型REAL，可选，范围0-100，例如70.5
     D REAL,

@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
+from utils.market_cap import to_yi  # 市值统一口径：元 → 亿元，未知返回 None
 
 
 class TrendStartStrategy(BaseStrategy):
@@ -153,10 +154,8 @@ class TrendStartStrategy(BaseStrategy):
         signal_info = self._check_trend_start_pattern(df)
         
         if signal_info:
-            # 计算市值
+            # 计算市值（缺失即未知，不用 close * 2e8 编造）
             market_cap_val = latest.get('market_cap')
-            if market_cap_val is None:
-                market_cap_val = latest['close'] * 2e8
             
             # 计算实际成交量比
             actual_volume_ratio = latest['volume'] / latest['ma5_volume'] if latest['ma5_volume'] > 0 else 1.0
@@ -165,7 +164,7 @@ class TrendStartStrategy(BaseStrategy):
                 'date': latest_date,
                 'close': round(latest['close'], 2),
                 'volume_ratio': round(actual_volume_ratio, 2),
-                'market_cap': round(market_cap_val / 1e8, 2),
+                'market_cap': to_yi(market_cap_val),
                 'key_date': signal_info.get('key_date', str(latest_date)[:10]),
                 'key_date_type': '趋势起点确认日',
             })

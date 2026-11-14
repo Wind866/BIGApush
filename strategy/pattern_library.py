@@ -23,7 +23,9 @@ class B1PatternLibrary:
     - 为B2、B3等扩展预留空间
     """
     
-    CACHE_FILE = Path("/root/quant-csv/data/b1_pattern_library_cache.json")
+    # 缓存文件放在仓库内 data/ 下。原来写死 /root/quant-csv/...，
+    # 云端 runner 上 exists() 会抛 PermissionError，直接拖垮整个案例库初始化。
+    CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "b1_pattern_library_cache.json"
     
     def __init__(self, csv_manager):
         self.csv_manager = csv_manager
@@ -226,16 +228,24 @@ class B1PatternLibrary:
                     "meta": case_data["meta"],
                     "features": self._serialize_features(case_data["features"]),
                 }
-            
+
+            # 目录可能不存在（首次运行 / 只读挂载），失败也不影响本次计算
+            self.CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(self.CACHE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f, ensure_ascii=False, indent=2)
                 
+        except (OSError, PermissionError) as e:
+            print(f"⚠️ 缓存写入不可用（不影响本次结果）: {e}")
         except Exception as e:
             print(f"⚠️ 缓存保存失败: {e}")
     
     def _load_from_cache(self) -> bool:
         """从缓存加载案例库"""
-        if not self.CACHE_FILE.exists():
+        try:
+            if not self.CACHE_FILE.is_file():
+                return False
+        except (OSError, PermissionError) as e:
+            print(f"⚠️ 缓存路径不可访问（忽略缓存）: {e}")
             return False
         
         try:

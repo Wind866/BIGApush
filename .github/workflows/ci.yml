@@ -56,6 +56,44 @@ jobs:
       - name: 单元测试
         run: python -m unittest discover -s tests -v
 
+      # 曾经的 P0：strategy/pattern_config.py 把配置路径写死成 /root/quant-csv/...，
+      # 云端 runner（非 root 用户）上 Path.exists() 抛 PermissionError，导致
+      # pattern_config / pattern_library 导入失败、B1 图形匹配策略线上完全不可用，
+      # 而 compileall + 单测都发现不了。下面这段就是"云端等价"的最小冒烟。
+      - name: 云端等价冒烟（受限路径下必须能导入）
+        run: |
+          python - <<'PY'
+          import importlib
+          import os
+          import sys
+
+          # 1) 默认导入：仓库内有 config/strategy_params.yaml，必须能读到而不是崩
+          from strategy.pattern_config import B1_PERFECT_CASES
+          import strategy.pattern_config as pc
+          assert isinstance(pc._yaml_config, dict), '_yaml_config 必须是 dict'
+          assert B1_PERFECT_CASES, 'B1 案例配置不能为空'
+
+          # 2) 指向不可访问路径（模拟云端 /root）：必须静默降级，不能抛异常
+          os.environ['STRATEGY_PARAMS_PATH'] = '/root/quant-csv/config/strategy_params.yaml'
+          pc = importlib.reload(pc)
+          assert isinstance(pc._yaml_config, dict), '受限路径下应降级为空配置'
+          print('OK pattern_config：受限路径下导入正常，案例数', len(pc.B1_PERFECT_CASES))
+
+          # 3) 缓存路径不得落在仓库外（写不进去会拖垮案例库初始化）
+          from pathlib import Path
+          cache = Path('strategy/pattern_library.py').read_text(encoding='utf-8')
+          assert '/root/' not in cache, 'pattern_library 仍含硬编码 /root/ 路径'
+          print('OK pattern_library：缓存路径已仓库内相对化')
+          PY
+
+      - name: 禁止硬编码本地绝对路径
+        run: |
+          if grep -rnE "['\"]/root/" --include='*.py' . ; then
+            echo "::error::发现硬编码 /root/ 路径，云端 runner 无法访问"
+            exit 1
+          fi
+          echo "未发现硬编码 /root/ 路径"
+
       - name: Action 版本固定检查
         run: |
           if grep -rnE 'uses:[[:space:]]*[^[:space:]#]+@v[0-9]' .github/workflows --include='*.yml'; then

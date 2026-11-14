@@ -147,3 +147,51 @@ jobs:
                     f"detail={json.dumps(detail, ensure_ascii=False)} ok={good}")
           print("RESULT_IND :", f"{ok}/{len(codes)} 指标为真实计算值")
           PY
+
+      # 2026-11-14 修复专项：三处「云端必然踩到」的问题在 runner 上一次性验完
+      - name: 配置路径 / 板块数据 / 市值口径 验证
+        run: |
+          python - <<'PY'
+          import glob, json, re, sys
+          sys.path.insert(0, '.')
+
+          # 1) 配置路径：旧实现写死 /root/quant-csv，runner 上导入即 PermissionError
+          import importlib
+          import os
+          os.environ['STRATEGY_PARAMS_PATH'] = '/root/quant-csv/config/strategy_params.yaml'
+          import strategy.pattern_config as pc
+          pc = importlib.reload(pc)
+          ok_cfg = isinstance(pc._yaml_config, dict) and len(pc.B1_PERFECT_CASES) > 0
+          print(f"[CFG] 受限路径导入={'OK' if ok_cfg else 'FAIL'} cases={len(pc.B1_PERFECT_CASES)}")
+
+          # 2) 板块数据：概念板块必须有数据，且消息里不能出现「数据源不可用」
+          import sector_data as sd
+          inds = sd.get_industry_sectors()
+          cons = sd.get_concept_sectors()
+          msg = sd.format_sector_message()
+          ok_ind = len(inds) > 0
+          ok_con = len(cons) > 0 and '数据源暂不可用' not in msg
+          print(f"[BOARD] 行业={len(inds)} 概念={len(cons)} 显式报缺={'是' if '数据源暂不可用' in msg else '否'}")
+          if cons:
+              print('[BOARD] 概念领涨:', [f"{c['name']}{c['pct']:+.2f}%" for c in cons[:3]],
+                    '| 领跌:', [f"{c['name']}{c['pct']:+.2f}%" for c in cons[-3:]])
+          print("RESULT_BOARD:", f"行业{'OK' if ok_ind else 'FAIL'} 概念{'OK' if ok_con else 'FAIL'}")
+
+          # 3) 市值：腾讯批量源（新主源）必须给出「元」量级真值
+          from utils.stock_data_fetcher import StockDataFetcher
+          sdf = object.__new__(StockDataFetcher)
+          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          caps = sdf._fetch_market_cap_tencent(codes)
+          ok_cap = len(caps) == len(codes) and all(v > 1e9 for v in caps.values())
+          print("[CAP] " + json.dumps({k: f'{v/1e8:.2f}亿' for k, v in caps.items()}, ensure_ascii=False))
+          print("RESULT_CAP:", f"{len(caps)}/{len(codes)} 有市值（元）" + (" OK" if ok_cap else " 单位可疑"))
+
+          # 4) 假市值兜底必须清干净：策略代码里不得再出现未注释的 2e8
+          hits = []
+          for path in sorted(glob.glob('strategy/*.py')):
+              for lineno, line in enumerate(open(path, encoding='utf-8'), 1):
+                  code = line.split('#', 1)[0]
+                  if '2e8' in code:
+                      hits.append(f'{path}:{lineno}')
+          print("RESULT_FAKECAP:", "CLEAN" if not hits else f"LEFT {hits}")
+          PY

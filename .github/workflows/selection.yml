@@ -100,7 +100,9 @@ jobs:
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
           SKIP_DATA_UPDATE: ${{ inputs.skip_update && '1' || '0' }}
         run: python main.py run
-        timeout-minutes: 55
+        # 实测最长 51.9 分钟（数据更新 30 分 + 选股推送 20 分），原来 55 分只剩 3 分余量，
+        # 数据源一慢就整档被砍；提到 75 分（job 90 分内，仍留 15 分给收尾与推送）
+        timeout-minutes: 75
 
       - name: 非交易日提示
         if: steps.trading.outputs.is_trading != 'true' && inputs.force != true

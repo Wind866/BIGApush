@@ -68,13 +68,15 @@ class DataInitializer:
                 logger.info(f"成功获取 {len(all_stocks)} 只股票的基本信息")
             
             # 步骤2：获取股票市值（批量）
-            logger.info("从 Tushare 获取股票市值信息...")
-            market_caps = self.stock_data_fetcher.get_stock_market_cap()
-            
+            # 主源腾讯批量行情（无需 token），Tushare 仅兜底 —— 原来只走 Tushare，
+            # 没配 token 时市值恒为空，下游只好用 close*2e8 猜一个假市值。
+            logger.info("批量获取股票市值信息（腾讯行情 → Tushare 兜底）...")
+            market_caps = self.stock_data_fetcher.get_stock_market_cap(stock_codes)
+
             if market_caps:
                 logger.info(f"成功获取 {len(market_caps)} 只股票的市值信息")
             else:
-                logger.warning("未获取到市值信息，将使用默认值 0")
+                logger.warning("未获取到市值信息，市值留空（不再用 0 冒充，下游按未知处理）")
             
             # 步骤3：批量保存到数据库
             with self.db_manager.transaction():
@@ -84,8 +86,8 @@ class DataInitializer:
                     try:
                         # 从批量获取的数据中查找基本信息
                         name = all_stocks.get(code, '')
-                        # 获取市值信息，如果没有则使用 0
-                        market_cap = market_caps.get(code, 0)
+                        # 取不到市值就留空（NULL），不要写 0 —— 0 会让下游误以为「市值 0 亿」
+                        market_cap = market_caps.get(code)
                         
                         if name:
                             # 保存基本信息和市值到 stock_basic 表

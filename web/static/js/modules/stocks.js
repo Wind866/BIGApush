@@ -295,7 +295,7 @@ export function renderStocks(stocks) {
             <td>${stock.name}</td>
             <td>¥${stock.latest_price}</td>
             <td>${stock.latest_date}</td>
-            <td>${stock.market_cap}</td>
+            <td>${stock.market_cap != null ? stock.market_cap + ' 亿' : '—'}</td>
             <td>${stock.data_count}</td>
             <td>
                 <button class="btn btn-secondary" onclick="viewStockDetail('${stock.code}')">

@@ -145,7 +145,38 @@ class KlineInitializer:
             self.progress['status'] = 'completed'
             self.progress['end_time'] = datetime.now()
             total_time = (self.progress['end_time'] - self.progress['start_time']).total_seconds()
-            
+
+            # 失败可见：数据源大面积挂掉时不能报「初始化完成」然后让选股基于半空库跑。
+            # 以前这里无条件 success=True，于是 80% 股票没入库也显示绿色，
+            # 第二天选股 0 只、卡片空白，却找不到任何失败痕迹。
+            failed_count = len(self.progress['failed_stocks'])
+            failed_ratio = failed_count / self.progress['total'] if self.progress['total'] else 0.0
+
+            if self.progress['inserted_records'] == 0:
+                logger.error(f"K线初始化失败：{self.progress['total']} 只股票一条记录都没写入")
+                self._log("初始化失败: 一条记录都没写入，数据源可能整体不可用")
+                self.progress['status'] = 'failed'
+                return {
+                    'success': False,
+                    'task_id': task_id,
+                    'message': '初始化失败：未写入任何记录（数据源整体不可用？）',
+                    'total_stocks': self.progress['total'],
+                    'inserted_records': 0,
+                    'failed_stocks': failed_count,
+                    'failed_stock_list': self.progress['failed_stocks'][:10],
+                    'total_time': total_time,
+                }
+
+            if failed_ratio > 0.2:
+                logger.warning(
+                    f"K线初始化完成但有 {failed_count}/{self.progress['total']} "
+                    f"({failed_ratio:.0%}) 只股票取数失败，这些股票不会出现在选股结果里"
+                )
+                self._log(
+                    f"⚠️ {failed_count} 只取数失败（{failed_ratio:.0%}），"
+                    f"未写入任何假数据，这些票将缺席选股"
+                )
+
             result = {
                 'success': True,
                 'task_id': task_id,

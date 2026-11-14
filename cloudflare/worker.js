@@ -304,6 +304,73 @@ function json(obj, status = 200) {
   });
 }
 
+function text(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+/** 常量时间字符串比较：避免用 === 比对密钥时按前缀长度泄露时序信息。 */
+function timingSafeEqual(a, b) {
+  const x = new TextEncoder().encode(String(a));
+  const y = new TextEncoder().encode(String(b));
+  // 长度不同时不早退，仍然走完比较，只把结果固定为 false
+  let diff = x.length ^ y.length;
+  const n = Math.max(x.length, y.length);
+  for (let i = 0; i < n; i += 1) {
+    diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  }
+  return diff === 0;
+}
+
+/**
+ * 运维端点鉴权（/test、/feishu/poll、/feishu/selftest、/feishu 回调）。
+ *
+ * 这些端点以前完全裸奔：任何人拿到域名就能
+ *   - GET /test?at=22:13 触发一次真实推送（消耗 Actions、往群里发消息）
+ *   - GET /feishu/selftest?send=1 往群里发消息
+ *   - GET /feishu/poll 把群里最近消息的**内容**回显到浏览器
+ *   - POST /feishu 伪造消息事件（未配 ENCRYPT_KEY 时连签名都没有）
+ *
+ * 现在改为**默认关闭**：没配 ADMIN_TOKEN 就一律 503，并直接告诉你怎么配。
+ * 安全默认优先于便利——这类端点平时只有部署者在自测时用，配一个密钥的成本很低。
+ *
+ * 配好后用任意一种方式带上：
+ *   - 查询参数： ?key=<ADMIN_TOKEN>
+ *   - 请求头：   X-Admin-Token: <ADMIN_TOKEN>
+ */
+function requireAdmin(req, env) {
+  const expected = (env.ADMIN_TOKEN || "").trim();
+  if (!expected) {
+    return {
+      ok: false,
+      res: text(
+        [
+          "503 运维端点未启用：未配置 ADMIN_TOKEN。",
+          "",
+          "这些端点能触发推送、往群里发消息、读取群消息内容，因此默认关闭。",
+          "启用方式：",
+          "  npx wrangler secret put ADMIN_TOKEN      # 自定义一个足够长的随机串",
+          "之后访问：/health?key=<ADMIN_TOKEN>、/feishu/poll?key=<ADMIN_TOKEN>",
+          "",
+          "（定时触发与定时轮询不受影响，它们走 scheduled 入口，无需密钥。）",
+          "",
+        ].join("\n"),
+        503,
+      ),
+    };
+  }
+
+  const url = new URL(req.url);
+  const given = (req.headers.get("X-Admin-Token") || url.searchParams.get("key") || "").trim();
+  if (!given || !timingSafeEqual(given, expected)) {
+    console.log("[ADMIN] 鉴权失败，已拒绝");
+    return { ok: false, res: text("403 需要有效的 ADMIN_TOKEN（?key=… 或 X-Admin-Token 头）\n", 403) };
+  }
+  return { ok: true };
+}
+
 // ============================================================================
 // 飞书机器人：群里发 6 位股票代码 → 触发 stock-query.yml → 结果推回群
 // ============================================================================
@@ -958,6 +1025,15 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
+    // ── 运维端点鉴权 ────────────────────────────────────────────────────
+    // 只对「外部可直接调用且会产生副作用」的路径设卡：能触发推送、能往群里发消息、
+    // 能读群消息内容的，一律要求 ADMIN_TOKEN。/health 是只读探活，保持开放。
+    const ADMIN_PATHS = new Set(["/test", "/feishu/poll", "/feishu/selftest"]);
+    if (ADMIN_PATHS.has(url.pathname) || (url.pathname === "/feishu" && req.method === "POST")) {
+      const gate = requireAdmin(req, env);
+      if (!gate.ok) return gate.res;
+    }
+
     // 飞书自建应用的事件订阅入口：群里发 6 位代码 → dispatch stock-query.yml
     if (url.pathname === "/feishu") {
       if (req.method !== "POST") {
@@ -1084,9 +1160,11 @@ export default {
         tokenValid,
         tokenScopes,
         alertConfigured: Boolean((env.ALERT_WEBHOOK || "").trim()),
+        // 运维端点是否已上锁；false 表示 /test、/feishu/* 全部返回 503（安全默认）
+        adminToken: Boolean((env.ADMIN_TOKEN || "").trim()),
         feishuApp: Boolean((env.FEISHU_APP_ID || "").trim()),
         feishuPollEveryMin: POLL_EVERY_MIN,
-        note: "根路径不会触发任务；/test?at=HH:MM 手动测某档期，/health?check=1 校验 token；build 字段用于核对线上是否为此版代码",
+        note: "根路径不会触发任务；/test?at=HH:MM&key=… 手动测某档期，/health?check=1 校验 token；build 字段用于核对线上是否为此版代码",
       });
     }
 
@@ -1104,7 +1182,7 @@ export default {
     }
 
     return new Response(
-      "GitHub Actions 统一准点调度器\n\n/health            查看档期表与配置状态\n/health?check=1     校验 GH_TOKEN\n/test?at=22:13     手动触发某个档期（自测用）\n/feishu/poll       立刻轮询一次飞书群消息（群里 @机器人 发股票代码用这个，不需要公网回调）\n/feishu            POST，飞书事件回调用（仅在你有公网域名时才需要）\n",
+      "GitHub Actions 统一准点调度器\n\n/health                    查看档期表与配置状态（只读，无需密钥）\n/health?check=1            校验 GH_TOKEN\n\n以下运维端点需要 ADMIN_TOKEN（?key=<token> 或 X-Admin-Token 头）：\n/test?at=22:13             手动触发某个档期（自测用）\n/feishu/poll               立刻轮询一次飞书群消息（群里 @机器人 发股票代码用这个）\n/feishu/selftest           通道自检（?send=1 真往群里发一条）\n/feishu            POST    飞书事件回调用（仅在你有公网域名时才需要）\n",
       { headers: { "content-type": "text/plain; charset=utf-8" } },
     );
   },

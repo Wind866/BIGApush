@@ -21,6 +21,10 @@ WORKFLOW_FILE = "morning-news.yml"
 # 档期日界取早 08:00：08:43 正常档与延迟到当天 13:00（甚至次日 07:00）的触发
 # 都归到同一档。不能用 12 —— 08:43 减 12h 会落到前一天，与中午的延迟档分家。
 EDITION_CUTOFF_HOUR = 8
+# 目标档期整点（08:43 档），按「运行时刻 − 8h」归并（与 cutoff 等价，改用显式
+# slot_hour 是为了和其他脚本统一口径）。第二天凌晨才跑到的迟到运行仍归前一天，
+# 不会把当天早间档提前标记成已推送。
+EDITION_SLOT_HOUR = 8
 
 
 def get_index_data():
@@ -113,7 +117,8 @@ def main():
     # 幂等守卫：外部准点触发 + GitHub cron 延迟触发，同一档期只推一次。
     # 只认「飞书确实推送成功」写入的台账，调试/跳过运行不会误杀当天的真实推送。
     force = "--force" in sys.argv or os.environ.get("FORCE_PUSH", "").strip().lower() in ("1", "true", "yes")
-    if should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR):
+    if should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR,
+                   slot_hour=EDITION_SLOT_HOUR):
         return
 
     # 标题
@@ -162,7 +167,7 @@ def main():
     msg = "\n".join(lines)
     if send_feishu(msg):
         print(f"✅ 早间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
-        mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR)
+        mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR, slot_hour=EDITION_SLOT_HOUR)
     else:
         print("❌ 推送失败")
         sys.exit(1)

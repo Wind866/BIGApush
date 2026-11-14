@@ -40,6 +40,9 @@ from utils.push_guard import mark_pushed, should_skip  # noqa: E402
 
 WORKFLOW_FILE = "intraday-selection.yml"
 EDITION_CUTOFF_HOUR = 12
+# 目标档期整点（13:13 档）。按「运行时刻 − 13h」归并：当天下午迟到的运行仍算当天，
+# 不会把次日档期提前占用。
+EDITION_SLOT_HOUR = 13
 
 MIN_PCT = 3.0        # 只扫描涨幅 >= 3% 的强势股
 SCAN_FLOOR = 2.0     # 分页扫描到涨幅低于该值即停止
@@ -625,7 +628,8 @@ def main() -> int:
 
     # 幂等守卫：同一档期只推一次（外部准点 + GitHub cron 兜底）
     force = os.environ.get("FORCE_PUSH", "").strip().lower() in ("1", "true", "yes")
-    if not args.dry_run and should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR):
+    if not args.dry_run and should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR,
+                                        slot_hour=EDITION_SLOT_HOUR):
         return 0
 
     rows, quote_ts, source, snap = fetch_market_snapshot()
@@ -670,7 +674,7 @@ def main() -> int:
     webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
     sent = push(card, fallback, webhook)
     if sent:
-        mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR)
+        mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR, slot_hour=EDITION_SLOT_HOUR)
     return 0 if sent else 1
 
 

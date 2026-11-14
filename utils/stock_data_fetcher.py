@@ -778,70 +778,29 @@ class StockDataFetcher:
             logger.debug(f"HTTP获取历史数据失败: {e}")
             return None
     
-    def _generate_mock_data(self, stock_code: str, years: int = 6) -> pd.DataFrame:
-        """
-        生成模拟数据（当网络不可用时使用）
-        
-        参数：
-            stock_code: 股票代码
-            years: 生成数据的年份数
-        
-        返回：
-            模拟的历史数据DataFrame
-        """
-        import numpy as np
-        
-        np.random.seed(hash(stock_code) % 2**32)
-        
-        days = int(365 * years)
-        end_date = datetime.now()
-        dates = [end_date - timedelta(days=i) for i in range(days)]
-        
-        # 生成随机价格序列
-        base_price = 10 + np.random.random() * 30
-        returns = np.random.normal(0.0005, 0.02, days)
-        prices = base_price * np.exp(np.cumsum(returns))
-        
-        # 生成OHLC数据
-        df = pd.DataFrame({
-            'date': dates,
-            'close': prices,
-            'volume': np.random.randint(1000000, 10000000, days),
-            'amount': np.random.randint(10000000, 100000000, days),
-            'turnover': np.random.uniform(1, 10, days),
-        })
-        
-        # 生成合理的 open, high, low
-        df['open'] = df['close'] * (1 + np.random.normal(0, 0.005, days))
-        df['high'] = np.maximum(df[['open', 'close']].max(axis=1) * (1 + abs(np.random.normal(0, 0.01, days))), 
-                                df[['open', 'close']].max(axis=1))
-        df['low'] = np.minimum(df[['open', 'close']].min(axis=1) * (1 - abs(np.random.normal(0, 0.01, days))),
-                               df[['open', 'close']].min(axis=1))
-        
-        # 添加总市值
-        market_cap = self._get_realtime_market_cap(stock_code)
-        if market_cap:
-            df['market_cap'] = market_cap
-        else:
-            df['market_cap'] = np.random.uniform(5000000000, 50000000000)
-        
-        # 按日期倒序排列
-        df = df.sort_values('date', ascending=False)
-        
-        return df
+    # 说明：这里原先有一个 `_generate_mock_data()`，用 np.random 造随机游走行情。
+    # 它已随 fetch_stock_history 的假数据降级路径一并删除——本模块不再有任何
+    # "编一份数据顶上"的分支。需要造数请在测试里自己构造 DataFrame。
     
-    def fetch_stock_history(self, stock_code: str, years: int = 6) -> pd.DataFrame:
+
+    def fetch_stock_history(self, stock_code: str, years: int = 6) -> Optional[pd.DataFrame]:
         """
         抓取单只股票历史数据（前复权，按日期倒序排列）
 
-        数据源优先级: TickFlow 免费 API > 腾讯财经 > 模拟数据
+        数据源优先级: TickFlow 免费 API > 腾讯财经
+
+        ⚠️ 绝不返回编造的数据：两个源都拿不到就是拿不到，一律返回 None。
+        早期版本在这里降级到 `_generate_mock_data()`（随机游走行情），而
+        `kline_initializer` 无法区分真假，会把随机序列当真实 K 线写进数据库，
+        之后 15 个策略、买入建议、筹码分析全部在这份假数据上跑，且永远不会自愈。
+        宁可在初始化里记一只失败（可重试、可统计），也不能污染库。
 
         参数：
             stock_code: 股票代码
             years: 获取数据的年份数
 
         返回：
-            历史数据DataFrame
+            历史数据DataFrame；两个源均失败时返回 None
         """
         # 方法1: TickFlow 免费 API（批量端点，单只查询也支持）
         try:
@@ -849,8 +808,7 @@ class StockDataFetcher:
             if df is not None and not df.empty:
                 logger.debug(f"TickFlow 获取 {len(df)} 条历史数据")
                 return df
-            else:
-                logger.debug(f"TickFlow 返回空数据，降级到腾讯财经...")
+            logger.debug("TickFlow 返回空数据，降级到腾讯财经...")
         except Exception as e:
             logger.debug(f"TickFlow 异常: {e}，降级到腾讯财经...")
 
@@ -860,13 +818,11 @@ class StockDataFetcher:
             if df is not None and not df.empty:
                 logger.debug(f"腾讯财经获取 {len(df)} 条历史数据")
                 return df
-            else:
-                logger.debug(f"腾讯财经返回空数据，使用模拟数据...")
+            logger.warning(f"{stock_code} 腾讯财经返回空数据，本次不写入任何K线")
         except Exception as e:
-            logger.debug(f"腾讯财经异常: {e}，使用模拟数据...")
-        
-        # 降级: 使用模拟数据
-        return self._generate_mock_data(stock_code, years)
+            logger.warning(f"{stock_code} 腾讯财经异常: {e}，本次不写入任何K线")
+
+        return None
     
     def _fetch_stock_update_tencent_light(self, stock_code: str, days: int) -> Optional[pd.DataFrame]:
         """

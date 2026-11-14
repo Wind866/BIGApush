@@ -23,6 +23,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent
@@ -30,6 +31,11 @@ sys.path.insert(0, str(project_root))
 
 # 版本信息
 __version__ = "1.0.0"
+
+# 收盘选股的目标档期整点（15:43 档）。档期键按「运行时刻 − 15h」归并，
+# 当晚 23 点甚至次日 01:25 才跑到的迟到运行仍算当天的收盘档，
+# 不会把次日的档期提前占掉（旧实现用固定 cutoff=12，跨日就串档）。
+SELECTION_SLOT_HOUR = 15
 
 from utils.akshare_fetcher import AKShareFetcher
 from utils.db_manager import DBManager
@@ -62,6 +68,10 @@ class QuantSystem:
         # 初始化CSV管理器
         from utils.csv_manager import CSVManager
         self.csv_manager = CSVManager(self.data_dir)
+
+        # 最近一次选股的股票池统计（数据基准日 / 剔除只数 / 策略异常），
+        # 供推送消息标注「数据截至哪天」，避免旧数据选出来的结果看起来像今天的。
+        self.last_universe_stats = {}
     
     def _load_config(self, config_file):
         """加载配置文件"""
@@ -84,7 +94,9 @@ class QuantSystem:
             if stock_names:
                 return stock_names
         except Exception as e:
-            pass
+            # 不静默吞掉：名称读不到时下面会退化成「股票600519」，
+            # 卡片上看着像正常数据，实际上是降级态，必须留痕。
+            logger.warning("读取股票名称失败，退化为代码占位名: %s", e)
         
         # 如果数据库读取失败，使用默认名称
         return {code: f"股票{code}" for code in stock_data.keys()}
@@ -235,10 +247,26 @@ class QuantSystem:
         batch_data = self.db_manager.read_stocks_batch(process_codes)
         print(f"批量加载完成: {len(batch_data)} 只，耗时 {(_dt.now()-t0).total_seconds():.1f}秒")
 
-        # 预过滤无效股票
+        # 预过滤无效股票：名称 / ST / 数据时效
+        from utils.universe_guard import split_stale
+
+        # 时效优先：先按「全市场最新交易日」把停牌、退市、数据没更新的票剔掉。
+        # 以前这里只判断 len(df) >= 60，导致 600001（数据止于 2009-12-15）这类
+        # 退市股也能算指标、出信号，且卡片上看不出任何异常。
+        fresh_data, stale_stats = split_stale(batch_data)
+        ref_day = stale_stats.get('reference')
+        if stale_stats.get('stale'):
+            _oldest = stale_stats.get('oldest')
+            print(f"⚠️ 数据时效过滤: 剔除 {stale_stats['stale']}/{stale_stats['total']} 只"
+                  f"（基准交易日 {ref_day or '未知'}"
+                  + (f"，最老一根K线 {_oldest}" if _oldest else "") + "）")
+            if stale_stats.get('samples'):
+                _sample_txt = "、".join(f"{c}({d})" for c, d in stale_stats['samples'][:5])
+                print(f"   样例: {_sample_txt}")
+
         invalid_keywords = ['退', '未知', '退市', '已退']
         valid_stocks = {}
-        for code, df in batch_data.items():
+        for code, df in fresh_data.items():
             name = stock_names.get(code, '未知')
             if any(kw in name for kw in invalid_keywords):
                 continue
@@ -249,6 +277,14 @@ class QuantSystem:
             valid_stocks[code] = (name, df)
 
         print(f"有效股票: {len(valid_stocks)} 只")
+        self.last_universe_stats = {
+            'reference_date': ref_day.isoformat() if ref_day else None,
+            'total': stale_stats.get('total', 0),
+            'stale_dropped': stale_stats.get('stale', 0),
+            'stale_oldest': str(stale_stats.get('oldest')) if stale_stats.get('oldest') else None,
+            'usable': len(valid_stocks),
+            'strategy_errors': {},
+        }
 
         # 并行执行策略
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -258,10 +294,13 @@ class QuantSystem:
         results = {}
         indicators_dict = {}
         category_count = {}
+        strategy_errors = {}
 
         def _run_strategy(item):
             sname, sobj = item
             sigs = []
+            err_count = 0
+            first_err = None
             for code, (name, df) in valid_stocks.items():
                 try:
                     df_ind = sobj.calculate_indicators(df)
@@ -274,8 +313,18 @@ class QuantSystem:
                                 sigs.append({'code': code, 'name': name, 'signals': [s]})
                                 if return_data:
                                     indicators_dict[code] = df_ind
-                except Exception:
-                    pass
+                except Exception as _e:
+                    # 不再静默 pass：单只股票出错计数，超过阈值说明策略本身坏了，
+                    # 否则「策略异常 0 只」和「今天没信号」在卡片上完全一样。
+                    err_count += 1
+                    if first_err is None:
+                        first_err = f"{code}: {type(_e).__name__}: {_e}"
+            if err_count:
+                strategy_errors[sname] = {
+                    'errors': err_count,
+                    'of': len(valid_stocks),
+                    'first': first_err,
+                }
             return sname, sigs
 
         print(f"并行执行 {len(self.registry.strategies)} 个策略 (workers={_max_workers})")
@@ -285,6 +334,17 @@ class QuantSystem:
                 sname, sigs = future.result()
                 results[sname] = sigs
                 print(f"  ✓ {sname}: {len(sigs)} 只")
+
+        # 策略健康度：任一策略在过半股票上抛异常，基本可以断定是代码/数据字段问题，
+        # 把它显式打出来（Actions 里会变成 warning 标记），不要等到没人发现。
+        self.last_universe_stats['strategy_errors'] = strategy_errors
+        for _sname, _info in sorted(strategy_errors.items()):
+            _ratio = _info['errors'] / _info['of'] if _info['of'] else 0
+            if _ratio >= 0.5:
+                print(f"  ⚠️ 策略【{_sname}】在 {_info['errors']}/{_info['of']} 只股票上抛异常，"
+                      f"结果不可信；首条错误 {_info['first']}")
+            else:
+                print(f"  · 策略【{_sname}】有 {_info['errors']}/{_info['of']} 只计算失败（已跳过）")
 
         gc.collect()
         
@@ -643,8 +703,9 @@ B1完美图形匹配:
 
     parser.add_argument(
         '--host',
-        default='0.0.0.0',
-        help='Web服务器监听地址 (默认: 0.0.0.0)'
+        default='127.0.0.1',
+        help='Web服务器监听地址 (默认: 127.0.0.1 仅本机；'
+             '要用局域网访问设 0.0.0.0 并同时设置 WEB_ALLOWED_HOSTS)'
     )
 
     parser.add_argument(
@@ -725,7 +786,7 @@ B1完美图形匹配:
             # 幂等守卫：外部准点触发 + GitHub cron 延迟触发，同一档期只推一次。
             # 只认「飞书确实推送成功」写入的台账，非交易日/调试运行不会误杀当天推送。
             from utils.push_guard import mark_pushed, should_skip
-            if should_skip("selection.yml", cutoff_hour=12):
+            if should_skip("selection.yml", cutoff_hour=12, slot_hour=SELECTION_SLOT_HOUR):
                 print("⏭ 本档期已推送成功，跳过本次运行")
                 sys.exit(0)
             
@@ -763,10 +824,30 @@ B1完美图形匹配:
                             _cfg = _yaml.safe_load(_f) or {}
                         for _k, _v in _cfg.get('strategies', {}).items():
                             display_names[_k] = _v.get('display_name', _k)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    # 只影响卡片上显示中文策略名，回落到英文 key，但要留痕
+                    logger.debug("加载策略中文名映射失败，卡片将显示英文策略名: %s", _e)
 
                 lines = [f"📊 缅A每日推送 ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})", ""]
+
+                # 数据基准日：必须写出来。数据更新被跳过（15:00 前 / 抽样命中）时，
+                # 选股用的是旧 K 线，但卡片头只有「当前时间」，用户无法分辨。
+                _us = getattr(quant, 'last_universe_stats', {}) or {}
+                _ref = _us.get('reference_date')
+                if _ref:
+                    _today_str_for_ref = datetime.now().strftime('%Y-%m-%d')
+                    if _ref != _today_str_for_ref:
+                        lines.append(f"⚠️ 本次选股基于 {_ref} 的 K 线（非今日数据，请留意）")
+                    else:
+                        lines.append(f"数据截至 {_ref}")
+                if _us.get('stale_dropped'):
+                    lines.append(
+                        f"已剔除 {_us['stale_dropped']} 只停牌/数据未更新标的"
+                        + (f"（最老 K 线 {_us['stale_oldest']}）" if _us.get('stale_oldest') else "")
+                    )
+                if _us:
+                    lines.append("")
+
                 total = 0
                 all_stocks = []
                 if isinstance(result, dict):
@@ -785,6 +866,25 @@ B1完美图形匹配:
                                 all_stocks.append({'code': code, 'name': name})
                             lines.append("")
                             total += len(signals)
+
+                # 0 只结果要能区分「今天确实没信号」和「策略/数据坏了」。
+                # 不标注的话，两种情况的卡片长得一模一样。
+                if total == 0:
+                    _broken = [
+                        (n, i) for n, i in (quant.last_universe_stats.get('strategy_errors') or {}).items()
+                        if i.get('of') and i['errors'] / i['of'] >= 0.5
+                    ]
+                    if _broken:
+                        lines.append("⚠️ 今日无信号，但以下策略大面积计算失败，结果不可信：")
+                        for _n, _i in _broken[:5]:
+                            lines.append(f"  · {_n}：{_i['errors']}/{_i['of']} 只失败")
+                        lines.append("")
+                    elif quant.last_universe_stats.get('usable', 0) == 0:
+                        lines.append("⚠️ 今日无信号：可用股票池为 0（数据未就绪？请检查数据更新日志）")
+                        lines.append("")
+                    else:
+                        lines.append("今日各策略均无信号")
+                        lines.append("")
 
                 # 与上一日对比：新增/去除
                 if total > 0:
@@ -934,7 +1034,7 @@ B1完美图形匹配:
                         sys.exit(1)
                 else:
                     print("✅ 收盘选股飞书推送成功")
-                    mark_pushed("selection.yml", cutoff_hour=12)
+                    mark_pushed("selection.yml", cutoff_hour=12, slot_hour=SELECTION_SLOT_HOUR)
     
     elif args.command == 'web':
         # 启动Web服务器

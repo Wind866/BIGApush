@@ -13,14 +13,23 @@ GitHub cron 延迟到达时读台账发现本档已推 → 秒级退出，不会
 
 ## 档期（edition）
 
-- 单档任务（早间 / 晚间 / 收盘）：默认「当前时刻减 cutoff_hour 小时」落在哪天，就算哪档。
-  默认 8 等效于「北京时间早 08:00 换日」：晚间 22:13 正常触发与次日凌晨 03:00 延迟触发、
-  收盘 15:43 与次日 01:25 延迟触发，都会归到同一档。
-- cutoff 怎么选：盘中 / 收盘可用 12（换日推迟到中午，覆盖更长延迟）；
-  **早间 08:43 必须用 8（或 0），不能用 12** —— 08:43 减 12 小时会落到前一天，
-  与中午的延迟档分家，反而造成重复推送。
-- 双档任务（涨停接力 13:07 / 15:37 共用一个 workflow）：调用时传 slot="1307" / "1537"，
-  档期键会变成 "日期-slot"，同一天的两个档互不干扰。
+优先用 **slot_hour（目标档期的小时）** 归并，而不是固定 cutoff：
+
+    edition = (实际运行时刻 − slot_hour 小时).date()
+
+- 晚间 22:13 档，slot_hour=22：22:13 跑 → 归当天；次日 05:00 延迟跑 →
+  05:00−22h 落到前一天 07:00 → 仍归前一天；次日 11:20 晚跑 → 也归前一天。
+- 收盘 15:43 档，slot_hour=15；盘中 13:13 档，slot_hour=13；早间 08:43 档，slot_hour=8。
+- 这样"前一天档期迟到十几小时"不会再去抢今天的档期。
+
+## 为什么不再用固定 cutoff（历史坑）
+
+旧实现用 `cutoff_hour=8` 表示"早 08:00 换日"。晚间 22:13 档遇到 GitHub
+7~9 小时的调度延迟、甚至次日 11:20 才跑到时，`11:20 − 8h = 03:20` 落在**当天**，
+于是把"昨天晚上的新闻"记成了"今天晚上的档期已推送"，当晚 22:13 的推送被
+`should_skip()` 直接跳过——静默漏推，而且账本上看不出哪里错了。
+
+slot_hour 仍然向后兼容：不传时退回 cutoff_hour 行为。
 
 ## 失败策略：一律 fail-open
 
@@ -58,20 +67,26 @@ __all__ = [
     "already_pushed", "DEFAULT_CUTOFF_HOUR",
 ]
 
+def edition_date(moment: datetime | None = None, cutoff_hour: int = DEFAULT_CUTOFF_HOUR,
+                 slot_hour: int | None = None) -> date:
+    """把实际运行时刻归到它所属的推送档期。
 
-def edition_date(moment: datetime | None = None, cutoff_hour: int = DEFAULT_CUTOFF_HOUR) -> date:
-    """把实际运行时刻归到它所属的推送档期。"""
+    slot_hour 给了就按「目标档期小时」归并（推荐）：运行时刻 − slot_hour 小时。
+    否则退回旧的「− cutoff_hour」行为。
+    """
     moment = moment or datetime.now(BJ_TZ)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=BJ_TZ)
-    return (moment.astimezone(BJ_TZ) - timedelta(hours=cutoff_hour)).date()
+    shifted = moment.astimezone(BJ_TZ) - timedelta(hours=slot_hour if slot_hour is not None else cutoff_hour)
+    return shifted.date()
 
 
 def edition_key(workflow_file: str = "", slot: str | None = None,
                 cutoff_hour: int = DEFAULT_CUTOFF_HOUR,
-                now: datetime | None = None) -> str:
+                now: datetime | None = None,
+                slot_hour: int | None = None) -> str:
     """档期键：日期，或 日期-slot（同一天多档的任务）。"""
-    key = edition_date(now, cutoff_hour).isoformat()
+    key = edition_date(now, cutoff_hour, slot_hour).isoformat()
     if slot:
         key = f"{key}-{slot}"
     return key
@@ -157,6 +172,41 @@ def _forced() -> bool:
     return os.environ.get("FORCE_PUSH", "").strip().lower() in ("1", "true", "yes")
 
 
+def _record_matches(rec: dict, workflow_file: str, key: str,
+                    cutoff_hour: int, slot_hour: int | None) -> bool:
+    """台账里这条记录是否真的代表「key 这一档已推送」。
+
+    只比对 edition 字段不够：旧逻辑（固定 cutoff）会把「昨天 22:13 的档期，
+    今天 11:20 才跑到」记成 `2026-11-14`，这条脏记录会让今晚真正的 22:13
+    被误判为已推送 —— 也就是修复上线后仍会漏推一次。
+
+    所以这里用记录自己的时间戳按**当前口径**再算一遍档期：
+    算出来与 key 不一致，说明它记的是别的档期，不认账（宁可多推一条）。
+    时间戳解析不了就照旧认账，避免因为格式问题变成天天重推。
+    """
+    if rec.get("workflow") != workflow_file or rec.get("edition") != key:
+        return False
+    raw = str(rec.get("ts") or "").strip()
+    if not raw:
+        return True
+    try:
+        moment = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=BJ_TZ)
+    except ValueError:
+        return True
+    try:
+        actual = edition_date(moment, cutoff_hour, slot_hour).isoformat()
+    except Exception:  # noqa: BLE001
+        return True
+
+    # key 可能是 "2026-11-14" 或 "2026-11-14-1307"（同一天多档），只比日期部分
+    expected_date = "-".join(key.split("-")[:3])
+    if actual != expected_date:
+        print(f"[幂等] 忽略一条档期记错的旧记录：edition={key}，但它的时间戳 {raw} "
+              f"按当前口径属于 {actual}（旧版固定 cutoff 会写错跨日档期）")
+        return False
+    return True
+
+
 def already_pushed(workflow_file: str, edition: str,
                    cutoff_hour: int = DEFAULT_CUTOFF_HOUR) -> tuple[bool, str]:
     """兼容旧接口：查台账里本档期是否已推送成功。"""
@@ -172,8 +222,13 @@ def already_pushed(workflow_file: str, edition: str,
 def should_skip(workflow_file: str, force: bool = False,
                 now: datetime | None = None,
                 cutoff_hour: int = DEFAULT_CUTOFF_HOUR,
-                slot: str | None = None) -> bool:
-    """主入口：True 表示本档期已经推过，直接退出，不要再发消息。"""
+                slot: str | None = None,
+                slot_hour: int | None = None) -> bool:
+    """主入口：True 表示本档期已经推过，直接退出，不要再发消息。
+
+    slot_hour 传目标档期的整点小时（晚间 22、收盘 15、盘中 13、早间 8），
+    迟到十几小时的运行才不会被算成「今天的档期已推」。
+    """
     if os.environ.get("PUSH_GUARD_DISABLE", "").strip() == "1":
         print("[幂等] PUSH_GUARD_DISABLE=1，守卫已关闭")
         return False
@@ -181,13 +236,13 @@ def should_skip(workflow_file: str, force: bool = False,
         print("[幂等] FORCE 已开启，跳过检查，强制推送")
         return False
 
-    key = edition_key(workflow_file, slot, cutoff_hour, now)
+    key = edition_key(workflow_file, slot, cutoff_hour, now, slot_hour)
     records, _, available = _read_ledger()
     if not available:
         print("[幂等] 台账不可用，fail-open：照常推送（可能重复，但不漏推）")
         return False
     for rec in records:
-        if rec.get("workflow") == workflow_file and rec.get("edition") == key:
+        if _record_matches(rec, workflow_file, key, cutoff_hour, slot_hour):
             print(f"⏭ 跳过本次推送：档期 {key} 已在 {rec.get('ts', '?')} 推送成功"
                   f"（run {rec.get('run_id', '?')}）")
             print("   （外部准点触发 + GitHub cron 延迟触发时，只有先到的那次真的推；"
@@ -199,7 +254,8 @@ def should_skip(workflow_file: str, force: bool = False,
 
 def mark_pushed(workflow_file: str,
                 cutoff_hour: int = DEFAULT_CUTOFF_HOUR,
-                slot: str | None = None) -> bool:
+                slot: str | None = None,
+                slot_hour: int | None = None) -> bool:
     """**只在飞书确实推送成功之后**调用。写入台账，供后续重复触发判重。"""
     if os.environ.get("PUSH_GUARD_DISABLE", "").strip() == "1":
         return False
@@ -207,7 +263,7 @@ def mark_pushed(workflow_file: str,
         print("[幂等] 缺少 GITHUB_TOKEN / GITHUB_REPOSITORY，台账未写入（不影响本次推送）")
         return False
 
-    key = edition_key(workflow_file, slot, cutoff_hour)
+    key = edition_key(workflow_file, slot, cutoff_hour, None, slot_hour)
     record = {
         "workflow": workflow_file,
         "edition": key,
@@ -219,7 +275,9 @@ def mark_pushed(workflow_file: str,
         records, sha, available = _read_ledger()
         if not available:
             return False
-        if any(r.get("workflow") == workflow_file and r.get("edition") == key for r in records):
+        # 注意：这里只认「真正匹配」的记录。旧逻辑写错的跨日脏记录不算，
+        # 否则本档期的正确记录永远不会被补上。
+        if any(_record_matches(r, workflow_file, key, cutoff_hour, slot_hour) for r in records):
             print(f"[幂等] 档期 {key} 已有记录，无需重复写入")
             return True
         if _write_ledger(records + [record], sha):
@@ -239,8 +297,9 @@ def _main(argv: list[str]) -> int:
     force = "--force" in argv
     slot = next((a.split("=", 1)[1] for a in argv if a.startswith("--slot=")), None)
     cutoff = next((int(a.split("=", 1)[1]) for a in argv if a.startswith("--cutoff=")), DEFAULT_CUTOFF_HOUR)
-    skip = should_skip(workflow, force=force, cutoff_hour=cutoff, slot=slot)
-    print(f"workflow={workflow} edition={edition_key(workflow, slot, cutoff)} "
+    slot_hour = next((int(a.split("=", 1)[1]) for a in argv if a.startswith("--slot-hour=")), None)
+    skip = should_skip(workflow, force=force, cutoff_hour=cutoff, slot=slot, slot_hour=slot_hour)
+    print(f"workflow={workflow} edition={edition_key(workflow, slot, cutoff, None, slot_hour)} "
           f"→ {'SKIP' if skip else 'PUSH'}")
     return 0
 

@@ -15,9 +15,14 @@ BRANCH = "main"
 # 以下两项是 Secret，不要写进本文件：
 #   npx wrangler secret put GH_TOKEN           # fine-grained PAT，勾 3 个仓库的 Actions: Read and write
 #   npx wrangler secret put ALERT_WEBHOOK      # 独立的飞书告警机器人 webhook
+#   npx wrangler secret put ADMIN_TOKEN        # 必配：/test、/feishu/poll、/feishu/selftest 的访问密钥
 #   npx wrangler secret put FEISHU_APP_ID      # 自建应用 App ID（cli_ 开头），「群里发代码查个股」用
 #   npx wrangler secret put FEISHU_APP_SECRET  # 自建应用 App Secret
 #   npx wrangler secret put FEISHU_ENCRYPT_KEY # 可选，仅当飞书开了加密策略（事件回调模式才用）
+#
+# ADMIN_TOKEN 说明：运维端点能触发真实推送、往群里发消息、回显群消息内容，
+# 因此默认关闭——不配这个 Secret，访问它们一律返回 503。定时触发与定时轮询
+# 走 scheduled 入口，不受影响。访问时带 ?key=<ADMIN_TOKEN> 或 X-Admin-Token 头。
 #
 # 可选变量（[vars] 里加）：FEISHU_CHAT_ID = "oc_xxx"
 #   指定只监听某一个群；不配则自动列出机器人所在的所有群（需要 im:chat:readonly 权限）

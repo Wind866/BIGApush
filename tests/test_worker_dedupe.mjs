@@ -83,6 +83,8 @@ const env = {
   GH_TOKEN: "ghp_x",
   OWNER: "Wind866",
   BRANCH: "main",
+  // 运维端点（/feishu/poll 等）需要 ADMIN_TOKEN；未配置时一律 503。
+  ADMIN_TOKEN: "test-admin-token",
 };
 
 let instance = 0;
@@ -93,7 +95,11 @@ async function coldBoot() {
 }
 
 async function pollOf(mod) {
-  const res = await mod.fetch(new Request("https://w.dev/feishu/poll"), env, { waitUntil() {} });
+  const res = await mod.fetch(
+    new Request(`https://w.dev/feishu/poll?key=${env.ADMIN_TOKEN}`),
+    env,
+    { waitUntil() {} },
+  );
   return res.text();
 }
 

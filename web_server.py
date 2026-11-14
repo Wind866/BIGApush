@@ -127,14 +127,68 @@ app = Flask(__name__,
 app.json_encoder = NumpyEncoder
 
 # 初始化SocketIO（配置长连接参数以支持长时间的回测任务）
+# cors_allowed_origins 不设成 "*"：默认 None 表示只允许同源连接，
+# 前端用的就是同源的 io()，跨站页面无法凭空连上来收进度事件。
 socketio = SocketIO(
     app, 
-    cors_allowed_origins="*", 
+    cors_allowed_origins=None, 
     async_mode='threading',
     ping_timeout=3600,  # 1小时 ping 超时
     ping_interval=60,   # 60秒 ping 间隔
     max_http_buffer_size=int(1e8)  # 100MB 缓冲区
 )
+
+# ==================== 访问控制 ====================
+# 本服务没有登录态：谁能访问它，谁就能改策略参数、启停数据任务、读全部选股结果。
+# 所以这里做两道门，默认只放行本机：
+#   1) Host 头必须是本机地址 —— 挡住 DNS rebinding（恶意域名解析到 127.0.0.1 后
+#      浏览器会把该域名当成同源，从而绕过同源策略读写本服务）。
+#   2) 写操作（POST/PUT/PATCH/DELETE）若带 Origin 头，必须与本站同源 —— 挡住
+#      其他网站上的跨站表单/Fetch 直接 POST 进来。
+# 需要局域网访问时，必须显式声明放行的地址，例如：
+#   WEB_ALLOWED_HOSTS="192.168.1.10:5000" python main.py web --host 0.0.0.0
+# 注意：裸 IP + 端口在局域网里等同于免密管理后台，家里路由器上的其他设备都能操作。
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def allowed_hosts() -> set[str]:
+    """本机地址 + WEB_ALLOWED_HOSTS 里显式放行的地址。"""
+    extra = os.environ.get("WEB_ALLOWED_HOSTS", "")
+    return _LOOPBACK_HOSTS | {h.strip().lower() for h in extra.split(",") if h.strip()}
+
+
+def _host_only(value: str) -> str:
+    """把 'host:port' / '[::1]:5000' / 'http://host:port/x' 归一成纯主机名。"""
+    if not value:
+        return ""
+    value = value.strip().lower()
+    if "://" in value:
+        value = value.split("://", 1)[1]
+    value = value.split("/", 1)[0]
+    if value.startswith("["):          # [::1]:5000
+        return value[1:].split("]", 1)[0]
+    parts = value.split(":")
+    return parts[0] if len(parts) <= 2 else value
+
+
+@app.before_request
+def _guard_local_access():
+    allowed = allowed_hosts()
+
+    host = _host_only(request.host)
+    if host and host not in allowed:
+        logger.warning(f"拒绝访问：Host={request.host} path={request.path}")
+        return jsonify({"success": False, "error": "host not allowed"}), 403
+
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        origin = request.headers.get("Origin", "")
+        # 同源 fetch 会带 Origin；非浏览器客户端（curl/脚本）不带，放行。
+        if origin and _host_only(origin) not in allowed:
+            logger.warning(f"拒绝跨站写操作：Origin={origin} path={request.path}")
+            return jsonify({"success": False, "error": "cross-origin request blocked"}), 403
+    return None
+
 
 # ==================== 日志配置 ====================
 # 使用新的日志配置模块
@@ -4467,12 +4521,28 @@ def ignore_trade():
         return jsonify({"success": False, "error": str(e)})
 
 
-def run_web_server(host='0.0.0.0', port=5000, debug=False):
-    """启动Web服务器"""
+def run_web_server(host='127.0.0.1', port=5000, debug=False):
+    """启动Web服务器
+
+    默认只监听 127.0.0.1：这是一个没有登录态的管理后台，暴露到网络上等于
+    把「改策略参数 / 启停数据任务 / 读全部选股结果」的权限交给同网段所有人。
+    确实需要局域网访问时用 --host 0.0.0.0，并同时设置 WEB_ALLOWED_HOSTS。
+    """
     # 初始化日志系统
     from utils.log_config import LogConfig
     LogConfig.setup_logging()
-    
+
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        if not os.environ.get("WEB_ALLOWED_HOSTS", "").strip():
+            logger.warning(
+                "⚠️ 正在监听 %s 但未设置 WEB_ALLOWED_HOSTS："
+                "除本机外的所有请求都会被 403 拒绝。要开放访问请显式设置，"
+                "例如 WEB_ALLOWED_HOSTS=\"192.168.1.10:5000\"", host
+            )
+        else:
+            logger.warning("⚠️ Web 服务已对外开放：host=%s 放行=%s（该服务无登录鉴权）",
+                           host, sorted(allowed_hosts()))
+
     # 打印所有注册的路由
     print("\n注册的路由:")
     for rule in app.url_map.iter_rules():

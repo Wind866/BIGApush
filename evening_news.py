@@ -19,6 +19,10 @@ from utils.push_guard import mark_pushed, should_skip
 
 # 本文件对应的工作流，用于幂等检查（外部定时器与仓库 cron 会重复触发）
 WORKFLOW_FILE = "evening-news.yml"
+# 目标档期整点（22:13 档）。档期键按「运行时刻 − 22h」归并，所以次日凌晨甚至
+# 上午 11 点才跑到的迟到运行，仍然算作**前一天**的晚间档，不会把当天的档期
+# 提前标记成"已推送"而导致当晚漏推。
+EDITION_SLOT_HOUR = 22
 
 
 def get_index_data():
@@ -110,7 +114,7 @@ def main():
     # 幂等守卫：Cloudflare Worker 准点触发 + GitHub cron 延迟触发会打两次，
     # 同一档期只让先到的那次真的推送（FORCE_PUSH=1 或 --force 可强制重推）
     force = "--force" in sys.argv or os.environ.get("FORCE_PUSH", "").strip() in ("1", "true", "yes")
-    if should_skip(WORKFLOW_FILE, force=force):
+    if should_skip(WORKFLOW_FILE, force=force, slot_hour=EDITION_SLOT_HOUR):
         return
 
     # 标题
@@ -160,7 +164,7 @@ def main():
     if send_feishu(msg):
         print(f"✅ 晚间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
         # 只有飞书确实推送成功才记档期；非交易日/调试/失败的运行不会污染台账
-        mark_pushed(WORKFLOW_FILE)
+        mark_pushed(WORKFLOW_FILE, slot_hour=EDITION_SLOT_HOUR)
     else:
         print("❌ 推送失败")
         sys.exit(1)

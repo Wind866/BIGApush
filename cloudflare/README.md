@@ -64,6 +64,7 @@ GitHub 官方允许 fine-grained PAT 最长 1 年或无到期；不要按旧文�
 | --- | --- | --- |
 | `GH_TOKEN` | **Secret** | 第 1 步的 `github_pat_...` |
 | `ALERT_WEBHOOK` | **Secret** | 第 2 步的告警机器人 webhook |
+| `ADMIN_TOKEN` | **Secret** | 运维端点密钥，自定义随机长串（不配则 `/test`、`/feishu/*` 全部 503） |
 | `OWNER` | Text | `Wind866` |
 | `BRANCH` | Text | `main` |
 
@@ -76,7 +77,15 @@ cd cloudflare
 npx wrangler deploy
 npx wrangler secret put GH_TOKEN
 npx wrangler secret put ALERT_WEBHOOK
+npx wrangler secret put ADMIN_TOKEN   # 随便生成一个长随机串，例如 openssl rand -hex 24
 ```
+
+> **为什么必须配 `ADMIN_TOKEN`**：`/test` 能触发真实推送（消耗 Actions、往群里发消息），
+> `/feishu/poll` 会把群里最近消息的**内容**回显到浏览器，`/feishu/selftest?send=1` 会往群里
+> 发消息，`POST /feishu` 在未配加密策略时连签名都没有。这些端点以前是完全裸奔的，
+> 域名一泄露就等于把「发消息 / 读群消息 / 刷额度」的权限交出去。
+> 现在**默认关闭**：不配这个 Secret，访问它们一律 503 并返回配置说明。
+> 定时触发与定时轮询走 `scheduled` 入口，不需要密钥，不受影响。
 
 ### 4. ⚠️ 删掉旧的触发器
 
@@ -87,10 +96,13 @@ npx wrangler secret put ALERT_WEBHOOK
 ### 5. 自测
 
 ```
-https://gh-actions-scheduler.<子域>.workers.dev/health            查看档期表与配置
-https://gh-actions-scheduler.<子域>.workers.dev/health?check=1     校验 GH_TOKEN
-https://gh-actions-scheduler.<子域>.workers.dev/test?at=22:13      手动打一发指定档期
+https://gh-actions-scheduler.<子域>.workers.dev/health                    查看档期表与配置（只读，无需密钥）
+https://gh-actions-scheduler.<子域>.workers.dev/health?check=1             校验 GH_TOKEN
+https://gh-actions-scheduler.<子域>.workers.dev/test?at=22:13&key=<TOKEN>  手动打一发指定档期
 ```
+
+`/health` 会显示 `adminToken: true/false`，一眼看出运维端点是否已上锁。
+密钥也可以放在请求头里：`curl -H "X-Admin-Token: <TOKEN>" .../test?at=22:13`。
 
 根路径**不会**触发任何任务（旧版一打开就全量触发，已修正）。
 打完去 Actions 看日志：出现 `⏭ 跳过本次推送：档期 ... 已在 ... 推送成功` 说明
@@ -195,7 +207,8 @@ GitHub Actions 跑真实取数 → 结论推回提问的那个群
 只有在你自己有域名、并把域名绑到 Worker 之后才值得配：
 
 - 事件与回调 → 订阅方式选「将事件发送至开发者服务器」
-- 请求地址：`https://<你的域名>/feishu`（不要用 `*.workers.dev`，国内不通）
+- 请求地址：`https://<你的域名>/feishu?key=<ADMIN_TOKEN>`（不要用 `*.workers.dev`，国内不通）
+  末尾的 `?key=` 不能省：`POST /feishu` 现在要求 `ADMIN_TOKEN`，否则飞书回调会被 403 挡掉
 - 添加事件：`接收消息 im.message.receive_v1`
 
 保存时飞书会打一发 `url_verification`，本 Worker 原样回 `challenge`，保存成功即地址通。

@@ -74,6 +74,9 @@ SINA_RANK = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/"
              "json_v2.php/Market_Center.getHQNodeData")
 SINA_FLOW = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/"
              "json_v2.php/MoneyFlow.ssi_ssfx_flzjtj")
+# 同一组接口下的「资金流向历史」：按天给净额，用来画近 20 个交易日的流入流出
+SINA_FLOW_HIST = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/"
+                  "json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs")
 TENCENT_HQ = "https://qt.gtimg.cn/q="
 EM_CLIST_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"  # 沪深主板+创业板+科创板
 
@@ -848,6 +851,51 @@ def sina_fetch_flow(codes: list[str], batch: int = 30) -> dict[str, dict]:
     if not out:
         raise SourceFailure("新浪资金流为空")
     return out
+
+
+def sina_fetch_flow_history(code: str, days: int = 25) -> list[dict]:
+    """新浪个股资金流历史（近 ``days`` 个交易日），按日期升序返回。
+
+    返回项：``{"date", "close", "pct", "net", "super_net"}``（net/super_net 单位：元）。
+
+    口径提醒（重要）：``net`` 是「主动买入 − 主动卖出」的全部成交差额（含中小单），
+    ``super_net`` 只是超大单净额。东财的「主力净流入」是「大单 + 超大单」，两者
+    **不等价**，所以卡片上必须标「新浪口径」，不能和东财的主力资金混着看。
+    """
+    symbol = _tx_symbol(code)
+    url = (f"{SINA_FLOW_HIST}?page=1&num={max(1, min(int(days), 40))}"
+           f"&sort=opendate&asc=0&daima={symbol}")
+    text = http_text(url, referer=SINA_REFERER, timeout=9, retries=1)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SourceFailure(f"新浪资金流历史非 JSON: {text[:60]}") from exc
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not data:
+        raise SourceFailure("新浪资金流历史为空")
+
+    rows: list[dict] = []
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        day = str(r.get("opendate") or "").strip()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            continue
+        net = num(r.get("netamount"))
+        if net is None:
+            continue
+        rows.append({
+            "date": day,
+            "close": num(r.get("trade")),
+            "pct": num(r.get("changeratio")),
+            "net": net,
+            "super_net": num(r.get("r0_net")),
+        })
+    if not rows:
+        raise SourceFailure("新浪资金流历史无可解析记录")
+    rows.sort(key=lambda x: x["date"])
+    return rows[-int(days):]
 
 
 def apply_flow_patch(quotes: dict[str, dict], patch: dict[str, dict]) -> int:

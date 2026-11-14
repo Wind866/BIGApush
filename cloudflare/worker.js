@@ -56,7 +56,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.4";
+const BUILD = "2026-11-14.5";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -497,9 +497,11 @@ async function handleQuery(env, codes, chatId) {
 //   im:chat:readonly              获取机器人所在群列表（自动找 chat_id 用，可选：
 //                                 直接在变量里配 FEISHU_CHAT_ID 就不需要这个权限）
 
-const POLL_EVERY_MIN = 2;                   // 每 2 分钟轮询一次
-const POLL_WINDOW_MS = 5 * 60 * 1000;       // 每次只看最近 5 分钟的消息
-const POLL_FIRST_LOOKBACK_MS = 90 * 1000;   // 实例首次轮询只回看 90 秒，避免把历史消息全部重跑
+const POLL_EVERY_MIN = 1;                   // 每 1 分钟轮询一次
+const POLL_WINDOW_MS = 5 * 60 * 1000;       // 热实例：每次看最近 5 分钟的消息
+const POLL_FIRST_LOOKBACK_MS = 90 * 1000;   // 冷实例首次轮询只回看 90 秒，避免把历史消息全部重跑
+// 必须保证 POLL_FIRST_LOOKBACK_MS > POLL_EVERY_MIN*60s，否则冷实例之间有消息会漏
+// （cron 每分钟唤醒，但实例不保证复用，所以按「最坏情况每次都是冷实例」来设）
 
 const pollSeen = new Map();                 // message_id 去重（实例级）
 let pollBootAt = 0;
@@ -546,6 +548,18 @@ async function feishuRecentMessages(env, chatId) {
 }
 
 /**
+ * 消息时间戳统一成毫秒。
+ * 飞书不同接口/版本给过秒也给过毫秒（字符串形式都一样），这里按量级判断，
+ * 免得因为单位不一致把消息全过滤掉（表现为「最近 20 条，窗口内 0 条」）。
+ */
+function msgTimeMs(it) {
+  const raw = it && it.create_time != null ? it.create_time : (it && it.body ? it.body.create_time : undefined);
+  const t = Number(raw);
+  if (!Number.isFinite(t) || t <= 0) return 0;
+  return t < 1e12 ? t * 1000 : t;
+}
+
+/**
  * 扫一遍所有群，处理 @机器人 + 6 位代码 的消息。
  * 返回一份人类可读的报告（/feishu/poll 会直接把它显示在浏览器里，便于自检）。
  */
@@ -562,6 +576,7 @@ async function pollFeishu(env) {
 
   const bot = await feishuBotInfo(env);
   report.push(`机器人：${bot.name || "(未命名)"} open_id=${bot.id || "?"}`);
+  report.push(`时间窗口：最近 ${Math.round((Date.now() - from) / 1000)} 秒（轮询间隔 ${POLL_EVERY_MIN} 分钟）`);
 
   const fixed = (env.FEISHU_CHAT_ID || "").trim();
   const chatIds = fixed ? [fixed] : await feishuChats(env);
@@ -578,11 +593,15 @@ async function pollFeishu(env) {
       continue;
     }
     const fetched = items.length;
+    const newest = items.reduce((mx, it) => Math.max(mx, msgTimeMs(it)), 0);
     items = items.filter((it) => {
-      const t = Number(it.create_time);
-      return Number.isFinite(t) && t > 0 ? t >= from : true;
+      const t = msgTimeMs(it);
+      return t > 0 ? t >= from : true;
     });
-    report.push(`  ${chatId} 最近 ${fetched} 条，落在窗口内 ${items.length} 条`);
+    const newestText = newest
+      ? `最新一条 ${Math.max(0, Math.round((Date.now() - newest) / 1000))} 秒前`
+      : "读不到时间戳";
+    report.push(`  ${chatId} 最近 ${fetched} 条（${newestText}），落在窗口内 ${items.length} 条`);
     // 接口是时间倒序，翻过来正序处理，保证「先问先答」
     for (const it of items.slice().reverse()) {
       const id = it.message_id || "";

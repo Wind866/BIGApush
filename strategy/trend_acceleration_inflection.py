@@ -25,6 +25,7 @@ from scipy import stats
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
 from utils.technical import MA, EMA, KDJ, calculate_zhixing_trend
+from utils.market_cap import to_yi  # 市值统一口径：元 → 亿元，未知返回 None
 
 
 class TrendAccelerationInflectionStrategy(BaseStrategy):
@@ -345,9 +346,8 @@ class TrendAccelerationInflectionStrategy(BaseStrategy):
             if pd.isna(bull_bear_line) or bull_bear_line is None:
                 bull_bear_line = 0
             
-            market_cap = latest.get('market_cap', latest['close'] * 2e8)
-            if pd.isna(market_cap) or market_cap is None:
-                market_cap = latest['close'] * 2e8
+            # 缺失即未知，不再用 close * 2e8 编造
+            market_cap = latest.get('market_cap')
             
             # 获取放量长阳日的日期
             key_date = surge_day['date'] if 'date' in surge_day else latest_date

@@ -12,25 +12,53 @@ import os
 import yaml
 from pathlib import Path
 
+# 仓库根目录（strategy/ 的上一层）。云端 runner 上没有 /root/quant-csv，
+# 之前把路径写死成绝对路径会让 Path.exists() 直接抛 PermissionError，
+# 进而使 pattern_config / pattern_library 导入失败、B1 图形匹配策略线上不可用。
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _config_candidates():
+    """按优先级返回配置文件候选路径：环境变量 → 仓库内。
+
+    不再保留任何绝对路径兜底（例如旧部署机的本机路径）：云端 runner 上
+    访问这类路径会抛 PermissionError，正是它把整个策略注册表拖垮的。
+    需要自定义位置时设置环境变量 STRATEGY_PARAMS_PATH。
+    """
+    env_path = os.environ.get("STRATEGY_PARAMS_PATH", "").strip()
+    if env_path:
+        yield Path(env_path)
+    yield _REPO_ROOT / "config" / "strategy_params.yaml"
+
 
 def _load_yaml_config():
-    """从YAML配置文件加载B1PatternMatch配置"""
-    config_path = Path("/root/quant-csv/config/strategy_params.yaml")
-    
-    if not config_path.exists():
-        return {}
-    
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        return config.get('B1PatternMatch', {})
-    except Exception as e:
-        print(f"⚠️ 加载B1PatternMatch配置失败: {e}，使用默认值")
-        return {}
+    """从YAML配置文件加载B1PatternMatch配置
+
+    任何取不到的情况（不存在 / 无权限 / 解析失败）都只降级为默认值，绝不抛错，
+    避免一个可选配置文件把整个策略注册表拖垮。
+    """
+    for config_path in _config_candidates():
+        try:
+            if not config_path.is_file():
+                continue
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f) or {}
+            return config.get('B1PatternMatch', {}) or {}
+        except (OSError, PermissionError):
+            # 路径不可访问（如 /root/... 在 runner 上），静默跳到下一个候选
+            continue
+        except Exception as e:  # noqa: BLE001  解析失败同样降级
+            print(f"⚠️ 加载B1PatternMatch配置失败({config_path}): {e}，使用默认值")
+            continue
+    return {}
 
 
-# 加载YAML配置
-_yaml_config = _load_yaml_config()
+# 加载YAML配置（失败即用文件内默认值）
+try:
+    _yaml_config = _load_yaml_config()
+except Exception as e:  # noqa: BLE001  理论到不了这里，兜底防止模块导入失败
+    print(f"⚠️ 读取B1配置异常，使用默认值: {e}")
+    _yaml_config = {}
 
 # B1完美图形案例配置（10个历史成功案例）
 # 注：日期为"选股系统选出的买入日期"，不是突破日

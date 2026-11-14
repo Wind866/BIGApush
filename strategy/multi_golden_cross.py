@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
+from utils.market_cap import to_yi  # 市值统一口径：元 → 亿元，未知返回 None
 
 
 class MultiGoldenCrossStrategy(BaseStrategy):
@@ -148,9 +149,7 @@ class MultiGoldenCrossStrategy(BaseStrategy):
         # 按日期降序排序，返回与输入相同的顺序
         result = result.sort_values('date', ascending=False)
         
-        # 计算市值
-        if 'market_cap' not in result.columns:
-            result['market_cap'] = close * 2e8
+        # 市值由数据层提供，缺失就让它缺失 —— 不再用 close * 2e8 造假值
         
         return result
     

@@ -258,16 +258,14 @@ def get_stocks():
         
         stock_list = []
         for stock in basic_stocks:
-            # 处理 market_cap 为 None 或 NaN 的情况
-            market_cap = stock.get('market_cap', 0)
-            if market_cap is None or (isinstance(market_cap, float) and market_cap != market_cap):
-                market_cap = 0
-            
-            # 单位转换：如果市值 > 10000，说明是万元单位，需要转换为亿元
-            # 否则已经是亿元单位
-            if market_cap > 10000:
-                # 万元转亿元：除以 10000
-                market_cap = market_cap / 10000
+            # market_cap 在库里统一按「元」存储（见 data/DataSql.sql 注释）。
+            # 原来这里靠「>10000 就当成万元」猜单位，元值会被再除一次 1e4，越猜越错。
+            # 取不到就给 None，由前端显示「—」，不要用 0 冒充真实市值。
+            _mc = stock.get('market_cap')
+            if _mc is None or (isinstance(_mc, float) and _mc != _mc) or float(_mc) <= 0:
+                market_cap = None
+            else:
+                market_cap = float(_mc) / 1e8  # 元 → 亿元
             
             # 从 stock_kline 表获取最新价格和日期
             kline_query = '''
@@ -296,7 +294,7 @@ def get_stocks():
                 'name': stock['name'],
                 'latest_price': latest_price,
                 'latest_date': latest_date,
-                'market_cap': round(market_cap, 2),  # 总市值，单位：亿
+                'market_cap': round(market_cap, 2) if market_cap is not None else None,  # 总市值，单位：亿元
                 'data_count': data_count
             })
         
@@ -723,7 +721,7 @@ def get_stock_detail(code):
                 'close': round(row['close'], 2) if pd.notna(row['close']) else None,
                 'volume': int(row['volume']) if pd.notna(row['volume']) else 0,
                 'turnover': round(row.get('turnover', 0), 2) if 'turnover' in row and pd.notna(row.get('turnover')) else 0,
-                'market_cap': round(row.get('market_cap', 0) / 1e8, 2) if 'market_cap' in row and pd.notna(row.get('market_cap')) else 0,  # 总市值，单位：亿
+                'market_cap': round(row.get('market_cap') / 1e8, 2) if 'market_cap' in row and pd.notna(row.get('market_cap')) else None,  # 总市值，单位：亿元
                 'K': round(kdj_row['K'], 2) if pd.notna(kdj_row['K']) else None,
                 'D': round(kdj_row['D'], 2) if pd.notna(kdj_row['D']) else None,
                 'J': round(kdj_row['J'], 2) if pd.notna(kdj_row['J']) else None

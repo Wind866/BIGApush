@@ -762,12 +762,14 @@ class StockDataFetcher:
                 if records:
                     df = pd.DataFrame(records)
                     df['date'] = pd.to_datetime(df['date'])
-                    # 从实时数据获取总市值
+                    # 从实时数据获取总市值；取不到就留 NaN。
+                    # 原来是 abs(hash(code)) % 500 生成的伪随机市值，纯属编数据，
+                    # 会被市值分档/筛选当真值使用。
                     market_cap = self._get_realtime_market_cap(stock_code)
                     if market_cap:
                         df['market_cap'] = market_cap
                     else:
-                        df['market_cap'] = abs(hash(stock_code)) % 500 * 100000000 + 5000000000
+                        df['market_cap'] = float('nan')
                     df = df.sort_values('date', ascending=False)
                     return df
             
@@ -965,87 +967,106 @@ class StockDataFetcher:
 
         return None
 
-    def get_stock_market_cap(self, max_retries=3) -> dict:
+    def _market_cap_from_tushare(self, max_retries=3) -> dict:
+        """Tushare daily_basic 取总市值（兜底源，需要 token）。
+
+        返回 {code: market_cap}，单位**元**（与 kline.market_cap 列保持一致）。
         """
-        从 Tushare daily_basic 接口批量获取股票市值信息
-        
-        参数：
-            max_retries: 最大重试次数
-        
-        返回：
-            {code: market_cap} 字典，market_cap 单位为亿元
-        
-        说明：
-            - 调用 Tushare 的 daily_basic 接口（一次性获取所有股票）
-            - 提取 ts_code 和 total_mv 字段
-            - 转换格式：code = ts_code.split('.')[0]
-            - 单位转换：market_cap = total_mv / 10000（万元转亿元）
-            - 如果获取失败，返回空字典
-            - 使用批量处理，避免逐个查询
-        """
-        logger.info("开始批量获取股票市值信息...")
-        
-        # 尝试使用 Tushare 获取市值信息
         for attempt in range(max_retries):
             try:
                 logger.info(f"尝试 Tushare daily_basic 接口 (第{attempt+1}/{max_retries}次)...")
-                
+
                 import tushare as ts
                 import json
-                
-                # 读取 Tushare token
+
                 tushare_token = None
                 try:
                     with open('config/tushare_config.json', 'r', encoding='utf-8') as f:
                         config = json.load(f)
                         tushare_token = config.get('token') or config.get('api_key')
-                except:
+                except Exception:
                     pass
-                
+
                 if not tushare_token:
-                    logger.warning("未找到 Tushare token，跳过 Tushare 方法")
+                    logger.info("未配置 Tushare token，跳过该兜底源")
                     return {}
-                
-                # 初始化 Tushare Pro API
+
                 pro = ts.pro_api(tushare_token)
-                
-                # 调用 daily_basic 接口获取所有股票的市值信息
-                # daily_basic 接口返回所有股票的每日基本面指标
                 df = pro.daily_basic(fields='ts_code,total_mv')
-                
-                if df is not None and not df.empty:
-                    # 构建 {code: market_cap} 字典
-                    market_caps = {}
-                    
-                    for _, row in df.iterrows():
-                        try:
-                            # 提取股票代码（去掉交易所后缀）
-                            code = str(row['ts_code']).split('.')[0]
-                            
-                            # 提取总市值（单位：万元）
-                            total_mv = float(row['total_mv']) if pd.notna(row['total_mv']) else 0
-                            
-                            # 转换为亿元
-                            market_cap = total_mv / 10000
-                            
-                            market_caps[code] = market_cap
-                        
-                        except Exception as e:
-                            logger.debug(f"处理市值数据失败: {e}")
-                            continue
-                    
-                    if market_caps:
-                        logger.info(f"✓ 成功获取 {len(market_caps)} 只股票的市值信息")
-                        return market_caps
-                    else:
-                        logger.warning("daily_basic 返回空数据")
-                        return {}
-            
+
+                if df is None or df.empty:
+                    logger.warning("daily_basic 返回空数据")
+                    return {}
+
+                market_caps = {}
+                for _, row in df.iterrows():
+                    try:
+                        code = str(row['ts_code']).split('.')[0]
+                        total_mv = float(row['total_mv']) if pd.notna(row['total_mv']) else 0
+                        if total_mv > 0:
+                            # total_mv 单位万元 → 元（原来除以 1e4 变成亿元，与库里其它写入路径单位不一致）
+                            market_caps[code] = total_mv * 1e4
+                    except Exception as e:
+                        logger.debug(f"处理市值数据失败: {e}")
+                        continue
+
+                if market_caps:
+                    logger.info(f"✓ Tushare 获取 {len(market_caps)} 只股票市值")
+                return market_caps
+
             except Exception as e:
                 logger.debug(f"Tushare daily_basic 失败: {e}")
                 time.sleep(1)
-        
-        logger.warning("获取市值信息失败，返回空字典")
+        return {}
+
+    def get_stock_market_cap(self, stock_codes=None, max_retries=3) -> dict:
+        """
+        批量获取股票总市值
+
+        参数：
+            stock_codes: 股票代码列表；为空时自动取全市场代码
+            max_retries: Tushare 兜底源的重试次数
+
+        返回：
+            {code: market_cap} 字典，market_cap 单位为**元**
+
+        说明：
+            - 主源：腾讯证券批量行情（qt.gtimg.cn，字段 44 = 总市值/亿），
+              数据中心 IP 友好，不需要任何 token —— 这正是原实现缺失的一环：
+              `_fetch_market_cap_tencent` 早就写好了却从来没有被调用，
+              于是市值只能走 Tushare，没 token 时恒为空。
+            - 兜底：Tushare daily_basic（需要 token）
+            - 两个源都拿不到就返回空字典，让上层留空，绝不用假市值填充
+        """
+        logger.info("开始批量获取股票市值信息...")
+
+        codes = list(stock_codes) if stock_codes else list((self.get_all_stock_codes() or {}).keys())
+
+        # 主源：腾讯批量
+        if codes:
+            try:
+                tencent_caps = self._fetch_market_cap_tencent(codes)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"腾讯批量取市值异常: {e}")
+                tencent_caps = {}
+            if tencent_caps:
+                ratio = len(tencent_caps) / max(len(codes), 1)
+                logger.info(f"✓ 腾讯行情获取 {len(tencent_caps)}/{len(codes)} 只市值（覆盖率 {ratio:.0%}）")
+                if ratio >= 0.5:
+                    return tencent_caps
+                logger.warning("腾讯覆盖率偏低，仍尝试 Tushare 补齐")
+                tushare_caps = self._market_cap_from_tushare(max_retries)
+                if tushare_caps:
+                    tushare_caps.update(tencent_caps)  # 腾讯更实时，覆盖同名 key
+                    return tushare_caps
+                return tencent_caps
+
+        # 兜底：Tushare
+        tushare_caps = self._market_cap_from_tushare(max_retries)
+        if tushare_caps:
+            return tushare_caps
+
+        logger.warning("获取市值信息失败（腾讯与 Tushare 均不可用），市值将留空")
         return {}
     
     def update_stock_market_cap(self, db_manager, max_retries=3) -> dict:
@@ -1072,7 +1093,7 @@ class StockDataFetcher:
         logger.info("开始批量更新股票市值信息...")
         
         # 获取最新市值信息
-        market_caps = self.get_stock_market_cap(max_retries)
+        market_caps = self.get_stock_market_cap(max_retries=max_retries)
         
         if not market_caps:
             logger.warning("未获取到市值信息，更新失败")

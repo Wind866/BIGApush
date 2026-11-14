@@ -11,6 +11,10 @@ data/scheduler.log
 
 # 本地定时兜底 / 数据源体检产物
 data/.scheduler_state.json
+# akshare 本地缓存 JSON（体积大且随时可重建，误提交会污染仓库）
+data/akshare_cache/
+# B1 图形库缓存（运行时生成，写不进去也不影响结果）
+data/b1_pattern_library_cache.json
 sources-health.json
 # 每日档期对账产物，只走 artifact，不入库
 docs/schedule-audit.md

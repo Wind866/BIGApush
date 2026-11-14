@@ -26,6 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from strategy.base_strategy import BaseStrategy
 from utils.technical import calculate_daily_return
+from utils.market_cap import to_yi  # 市值统一口径：元 → 亿元，未知返回 None
 
 
 class MorningStarStrategy(BaseStrategy):
@@ -73,9 +74,9 @@ class MorningStarStrategy(BaseStrategy):
         # result = result.ffill().bfill()  # ⚠️ bfill是未来函数！
         result = result.ffill()
 
-        # 计算市值
-        if 'market_cap' not in result.columns:
-            result['market_cap'] = result['close'] * 2e8
+        # 市值由数据层（腾讯行情）提供，取不到就保持缺失。
+        # 原来这里用 close * 2e8 编一个假市值（等于假设总股本 2 亿股），
+        # 会让市值分档 / 小盘筛选建立在虚构数据上。
 
         return result
 
@@ -145,15 +146,14 @@ class MorningStarStrategy(BaseStrategy):
             key_date_str = key_date.strftime('%Y-%m-%d') if hasattr(key_date, 'strftime') else str(key_date)[:10]
 
             # 构建选股信号
+            # 取不到就是未知（展示为「—」），不再猜一个假市值
             market_cap_val = latest.get('market_cap')
-            if market_cap_val is None:
-                market_cap_val = latest['close'] * 2e8
 
             signal_info = {
                 'date': latest_date,
                 'close': round(latest['close'], 2),
                 'volume_ratio': round(latest.get('volume_ratio', 1.0), 2),
-                'market_cap': round(market_cap_val / 1e8, 2),
+                'market_cap': to_yi(market_cap_val),
                 'reasons': ['启明星形态'],
                 'key_date': key_date_str,
                 'key_date_type': '启明星确认日',

@@ -254,7 +254,10 @@ class KlineInitializer:
                     'low': float(row.get('low', 0)),
                     'close': float(row.get('close', 0)),
                     'volume': int(row.get('volume', 0)),
-                    'market_cap': float(row.get('market_cap', 0)),
+                    # 市值取不到就写 NULL（不要 0），下游据此判「未知」而不是「市值 0 亿」
+                    'market_cap': (float(row['market_cap'])
+                                   if 'market_cap' in row and pd.notna(row['market_cap'])
+                                   else None),
                     'K': float(row.get('K', 0)),
                     'D': float(row.get('D', 0)),
                     'J': float(row.get('J', 0))

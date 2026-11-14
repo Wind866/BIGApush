@@ -18,6 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils.market_cap import to_yi  # noqa: E402  市值统一口径：元 → 亿元，未知返回 None
+
 logger = logging.getLogger(__name__)
 
 # 默认工作进程数 - 使用CPU核心数
@@ -321,7 +323,8 @@ class FastMultiGoldenCrossAnalyzer:
             close.rolling(window=114, min_periods=1).mean()
         ) / 4
         
-        market_cap = df['market_cap'].iloc[0] if 'market_cap' in df.columns else latest['close'] * 2e8
+        # 缺失即未知，不用 close * 2e8 编造
+        market_cap = df['market_cap'].iloc[0] if 'market_cap' in df.columns else None
         
         return {
             'code': stock_code,
@@ -342,7 +345,7 @@ class FastMultiGoldenCrossAnalyzer:
                 'DEA': round(DEA.iloc[0], 4),
                 'MACD': round((DIF.iloc[0] - DEA.iloc[0]) * 2, 4),
                 'volume_ratio': round(volume.iloc[0] / volume_ma.iloc[0], 2),
-                'market_cap': round(market_cap / 1e8, 2),
+                'market_cap': to_yi(market_cap),
                 'short_term_trend': round(short_term_trend.iloc[0], 2),
                 'bull_bear_line': round(bull_bear_line.iloc[0], 2),
                 'reasons': ['均线金叉', 'KDJ金叉', 'MACD金叉', '多指标共振']

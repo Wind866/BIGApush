@@ -96,6 +96,36 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=22:13      手动打�
 打完去 Actions 看日志：出现 `⏭ 跳过本次推送：档期 ... 已在 ... 推送成功` 说明
 幂等守卫生效；想真的再推一次，在 Actions 手动 Run workflow 勾 `force`。
 
+### 6. 核对线上版本（重要）
+
+`/health` 会返回 `build` 字段，例如 `"build": "2026-11-14.1"`。**每次改完 `worker.js`
+都要重新 Deploy，并用这个字段确认线上跑的就是仓库里这一版**。曾经出现过线上版本
+与仓库不同步：线上没有 `/test` 路由、档期名也不一致，导致自测请求被当成根路径处理，
+排查时极易误判成「Worker 挂了」。
+
+同时确认 Settings → Triggers 里 Cron expression 是 `* * * * *`（面板显示 `Every minute`）。
+`/health` 只能证明 Worker 已部署，**证明不了定时触发器已生效**。
+
+### 7. 两个可靠性修复（2026-11-14）
+
+- **用 `event.scheduledTime` 而不是 `Date.now()` 匹配档期**：Worker 冷启动或 CF 调度
+  抖动会让实际执行落进下一分钟，而档期是精确到 `HH:MM` 的字符串比对，一跨分钟
+  就永久错过该档期。这是配置齐全却仍漏跑的根因。偏差超过 2 分钟会主动告警。
+- **每 5 分钟补档回看**：若某次唤醒被 CF 丢弃，会在 2~7 分钟后检查该档期是否在
+  Actions 留下过 `workflow_dispatch` 记录，没有则补触发。判重窗口 ±10 分钟，
+  正常触发过的档期不会重复发；查不到 API 时一律不补（宁可漏补也不重复推）。
+  不需要 KV / D1，仍是无状态 Worker。
+
+### 8. 每日自动对账
+
+`scripts/schedule_audit.py` + `.github/workflows/schedule-audit.yml` 每天北京 23:30
+把「当日 9 档期应到 / 实到 / 延迟分钟」生成成 Markdown，写进 Step Summary 并上传
+artifact；发现已覆盖范围内有漏跑就让任务失败、走告警。
+
+内置 `GITHUB_TOKEN` 只能读本仓库，要核对另外两个仓库（尤其私有的 `etf-feishu-push`）
+需在 BIGApush 配置 Secret `AUDIT_PAT`（fine-grained PAT，三仓库 `Actions: read`）。
+未覆盖的仓库标「⬜ 未覆盖」，**不判失败**，避免把「查不到」误报成「没跑」。
+
 ## 仓库侧配套改动（已随本次提交落地）
 
 - 所有推送脚本接入台账式幂等守卫 `utils/push_guard.py` / `src/push_guard.py`：

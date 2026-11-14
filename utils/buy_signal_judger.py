@@ -196,11 +196,11 @@ class ScoreBuySignalJudger(BaseBuySignalJudger):
             
             # 判断评分是否达到阈值
             if score >= score_threshold:
-                reason = f"综合评分达到阈值 ({score:.2f} >= {score_threshold})
+                reason = f"综合评分达到阈值 ({score:.2f} >= {score_threshold})"
                 logger.debug(f"评分买点判断: 符合，{reason}")
                 return True, reason
             else:
-                reason = f"综合评分未达到阈值 ({score:.2f} < {score_threshold})
+                reason = f"综合评分未达到阈值 ({score:.2f} < {score_threshold})"
                 logger.debug(f"评分买点判断: 不符合，{reason}")
                 return False, reason
                 

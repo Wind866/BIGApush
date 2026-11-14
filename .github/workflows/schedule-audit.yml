@@ -1,0 +1,70 @@
+name: 档期对账 · 应到 / 实到
+
+# 事后核对，不是准点任务：GitHub cron 晚几小时不影响结论。
+# 目的是让「今天到底有没有按时跑」有据可查，而不是靠翻 Actions 列表猜。
+on:
+  schedule:
+    - cron: '30 15 * * 1-5'    # 北京 23:30，收齐当日全部 9 个档期
+  workflow_dispatch:
+    inputs:
+      date:
+        description: '对账日期 YYYY-MM-DD（留空 = 今天北京时间）'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: schedule-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: 准备 Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+
+      # AUDIT_PAT 是可选的 fine-grained PAT（三仓库 Actions: read）。
+      # 不配置时脚本只核对本仓库，其余标「未覆盖」而不误判为漏跑。
+      - name: 生成档期对账报告
+        env:
+          AUDIT_PAT: ${{ secrets.AUDIT_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          AUDIT_DATE: ${{ inputs.date }}
+          TZ: Asia/Shanghai
+        run: python scripts/schedule_audit.py
+
+      - name: 上传对账报告
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: schedule-audit-${{ github.run_id }}
+          path: docs/schedule-audit.md
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: 对账异常告警
+        if: failure()
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$ALERT_WEBHOOK" ]; then
+            echo "::error::未配置独立告警 Secret ALERT_WEBHOOK；本次告警退回业务 webhook，业务 webhook 故障时告警会一并失效"
+          fi
+          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
+          if [ -z "$HOOK" ]; then echo "::error::未配置告警 webhook，跳过对账告警"; exit 0; fi
+          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
+            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 档期对账发现漏跑或异常，请查看日志：$RUN_URL\"}}" \
+            >/dev/null || echo "::error::告警发送失败（独立告警通道可能也失效）"

@@ -30,9 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -55,8 +55,11 @@ jobs:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          if [ -z "$ALERT_WEBHOOK" ]; then
+            echo "::error::未配置独立告警 Secret ALERT_WEBHOOK；本次告警退回业务 webhook，业务 webhook 故障时告警会一并失效"
+          fi
           HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
-          if [ -z "$HOOK" ]; then echo "未配置告警 webhook，跳过失败告警"; exit 0; fi
+          if [ -z "$HOOK" ]; then echo "::error::未配置告警 webhook，跳过失败告警"; exit 0; fi
           curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
             -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 早间新闻任务运行失败，请查看日志：$RUN_URL\"}}" \
-            >/dev/null || true
+            >/dev/null || echo "::error::告警发送失败（独立告警通道可能也失效）"

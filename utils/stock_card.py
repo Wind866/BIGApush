@@ -46,6 +46,7 @@ MAS = (
     (60, "#374151"),
 )
 KLINE_BARS = 120  # 画多少根 K 线；MA60 需要至少 60 根，90 根时开头会缺一大截
+FLOW_BARS = 20    # 资金流画多少个交易日（一个月约 20 个交易日）
 
 # 筹码分布用的浅色（比涨跌色淡，避免和 K 线抢眼）：成本在现价下方=浮盈，上方=套牢
 CHIP_PROFIT = "#eaa1a1"
@@ -390,6 +391,65 @@ def _draw_chips(fig, chips, rect, price_ax):
                       "edgecolor": "none", "alpha": 0.85})
 
 
+def _draw_flow(fig, flow_hist, rect):
+    """近 N 个交易日资金净流入柱状图：红=净流入、绿=净流出，零轴居中。
+
+    数据是新浪「资金流向历史」的 net（主动买入 − 主动卖出，含中小单）。它和
+    东财「主力 = 大单 + 超大单」不是一个口径，所以标题右侧直接写「新浪口径」，
+    别让人拿它跟卡片上的「主力净流入」对着抠。
+
+    这块只有 0.95 英寸高，所以：x 轴只标首尾两个日期，y 轴只留 2 个刻度，
+    柱宽 0.62 —— 再密就成一坨色块了。
+    """
+    ax = fig.add_axes(rect)
+    rows = list(flow_hist or [])[-FLOW_BARS:]
+    if not rows:
+        ax.set_axis_off()
+        return
+
+    xs = list(range(len(rows)))
+    vals = [(r.get("net") or 0) / 1e8 for r in rows]
+    ax.bar(xs, vals, color=[UP if v >= 0 else DOWN for v in vals],
+           width=0.62, linewidth=0)
+    ax.axhline(0, color="#c9ced6", linewidth=0.9, zorder=3)
+    ax.set_xlim(-0.8, len(rows) - 0.2)
+    ax.grid(axis="y", color=LINE, linewidth=0.6)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left", "bottom"):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(axis="y", labelsize=7.5, colors=SUB, length=0)
+    # 只留「最低 / 0 / 最高」三个刻度：自动 locator 常常只给 0 和 10，
+    # 负值那一侧就没有参照物了
+    lo, hi = min(vals), max(vals)
+    ticks = sorted({round(lo, 1), 0.0, round(hi, 1)})
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t:g}" for t in ticks], fontsize=7.5, color=SUB,
+                       family=_font_name)
+
+    # 极端那天（比如涨停放量 +14 亿）会一枝独秀：数值交给顶部刻度，
+    # 不再往柱子上压字——柱顶就是坐标轴顶边，写字必和右侧摘要撞行
+
+    ax.set_xticks([0, len(rows) - 1])
+    ax.set_xticklabels([rows[0]["date"][5:].replace("-", "/"),
+                        rows[-1]["date"][5:].replace("-", "/")],
+                       fontsize=7.5, color=SUB, family=_font_name)
+    ax.tick_params(axis="x", length=0, pad=1)
+    labels = ax.get_xticklabels()
+    if labels:  # 首尾标签左/右对齐，别半个字露出画布
+        labels[0].set_ha("left")
+        labels[-1].set_ha("right")
+
+    ax.set_title(f"近 {len(rows)} 交易日 资金净流入（亿元）", loc="left",
+                 fontsize=8, color=SUB, family=_font_name, pad=4)
+    total = sum(vals)
+    sup = sum((r.get("super_net") or 0) for r in rows) / 1e8
+    inflow = sum(1 for v in vals if v > 0)
+    ax.text(1.0, 1.02,
+            f"累计 {total:+.2f} 亿 · 流入 {inflow}/{len(rows)} 天 · 超大单 {sup:+.2f} 亿 · 新浪口径",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5,
+            color=SUB, family=_font_name)
+
+
 def _draw_metrics(fig, items, rect):
     """指标网格：items 是 [(标签, 值, 颜色)]，每行 4 个。
 
@@ -508,8 +568,9 @@ def render_stock_card(
     signals: Optional[list] = None,
     hist=None,
     chips: Optional[dict] = None,
+    flow_hist: Optional[list] = None,
     generated_at: str = "",
-    sources: str = "腾讯行情 / 同花顺资金流 / 百度估值 / 新浪财报",
+    sources: str = "腾讯行情 / 同花顺资金流 / 新浪资金流历史 / 百度估值 / 新浪财报",
 ) -> bool:
     """渲染一张个股卡片 PNG。
 
@@ -517,6 +578,8 @@ def render_stock_card(
         hist: 历史行情 DataFrame（列：date/open/high/low/close/volume），可给 None。
         chips: ``utils.chip_analysis.compute_chip_distribution`` 的返回值；
             没有（或缺流通股本导致 available=False）就不画筹码，卡片其余部分照旧。
+        flow_hist: ``utils.market_sources.sina_fetch_flow_history`` 的返回值
+            （[{date, net, super_net}]）；没有就不画资金流面板，图也相应变矮。
 
     Returns:
         True 渲染成功；False 表示环境缺中文字体或绘制失败，调用方应退回纯文本。
@@ -533,6 +596,7 @@ def render_stock_card(
     advice = advice or {}
     signals = signals or []
     chips = chips if isinstance(chips, dict) and chips.get("available") else {}
+    flow_hist = [r for r in (flow_hist or []) if isinstance(r, dict) and r.get("net") is not None]
     indicators = technical.get("indicators") or {}
 
     def _with_level(number, level, unit=""):
@@ -586,28 +650,48 @@ def render_stock_card(
     # 有 K 线就按「图 + 窄指标 + 结论」排；没有就把图压成一条提示，
     # 把高度让给指标和结论，避免卡片中间空一大块
     has_chart = hist is not None and len(hist) >= 5
-    chip_rect = None
+    has_flow = has_chart and bool(flow_hist)
+
+    # 自顶向下按「英寸」堆叠，而不是写死一堆百分比：面板多一块就只加画布高度，
+    # 不用把其它面板的百分比统统重算一遍（重算最容易压字）。
+    canvas_h = 13.7 if has_flow else 12.6
+    def _rect(offset_in, height_in, x=0.055, w=0.90):
+        top_in = canvas_h * 0.885          # 顶部色带上沿
+        return [x, (top_in - offset_in - height_in) / canvas_h, w, height_in / canvas_h]
+
+    cur = 0.30                             # 顶部留白
+    chip_rect, flow_rect = None, None
     if has_chart and chips:
-        # 右侧 11.5% 图宽留给筹码分布；指标多了一行，纵向也要重排
-        kline_rect, vol_rect = [0.055, 0.625, 0.775, 0.230], [0.055, 0.535, 0.775, 0.070]
-        chip_rect = [0.833, 0.625, 0.117, 0.230]
-        metrics_rect, advice_rect = [0.05, 0.240, 0.90, 0.285], [0.05, 0.042, 0.90, 0.180]
+        kline_rect = _rect(cur, 2.95, 0.055, 0.775)
+        chip_rect = [0.833, kline_rect[1], 0.117, kline_rect[3]]
+        cur += 2.95 + 0.07
+        vol_rect = _rect(cur, 0.85, 0.055, 0.775)
+        cur += 0.85 + (0.34 if has_flow else 0.12)
     elif has_chart:
-        # 价格轴底边与成交量轴顶边留 2.3% 图高的间隙：贴在一起时价格轴最下面那个
-        # 刻度会和「成交量（亿股）」标题撞在一行里
-        kline_rect, vol_rect = [0.055, 0.600, 0.90, 0.245], [0.055, 0.505, 0.90, 0.072]
-        metrics_rect, advice_rect = [0.05, 0.255, 0.90, 0.225], [0.05, 0.045, 0.90, 0.195]
+        kline_rect = _rect(cur, 3.00, 0.055, 0.90)
+        cur += 3.00 + 0.07
+        vol_rect = _rect(cur, 0.88, 0.055, 0.90)
+        cur += 0.88 + (0.34 if has_flow else 0.12)
     else:
-        kline_rect, vol_rect = [0.05, 0.735, 0.90, 0.07], None
-        metrics_rect, advice_rect = [0.05, 0.335, 0.90, 0.34], [0.05, 0.045, 0.90, 0.195]
+        kline_rect, vol_rect = _rect(0.10, 0.70), None
+        cur = 0.10 + 0.70 + 0.12
+
+    if has_flow:
+        flow_rect = _rect(cur, 0.95)
+        cur += 0.95 + 0.20
+    metrics_rect = _rect(cur, 3.55)
+    cur += 3.55 + 0.12
+    advice_rect = _rect(cur, 2.30)
 
     try:
-        fig = plt.figure(figsize=(9, 12.6), dpi=120, facecolor=BG)
+        fig = plt.figure(figsize=(9, canvas_h), dpi=120, facecolor=BG)
         _draw_header(fig, name=name, code=code, market=market, industry=industry,
                      price=price, pct=pct, cap=cap)
         price_ax = _draw_kline(fig, hist, name, kline_rect, vol_rect)
         if chip_rect and price_ax is not None:
             _draw_chips(fig, chips, chip_rect, price_ax)
+        if flow_rect:
+            _draw_flow(fig, flow_hist, flow_rect)
         _draw_metrics(fig, items, metrics_rect)
         _draw_advice(fig, advice, signals, risks, advice_rect)
         _draw_footer(fig, sources, generated_at)

@@ -146,7 +146,7 @@ def _color_icon(pct):
 
 
 def format_stock(index: int, code: str, result: dict, quote: dict,
-                 chips: dict | None = None) -> str:
+                 chips: dict | None = None, flow_hist: list | None = None) -> str:
     """把单只股票的分析结果排成若干行纯文本。"""
     if not result:
         return f"{index}. {code}  ❌ 分析失败（数据源全部不可用或代码不存在）"
@@ -196,6 +196,17 @@ def format_stock(index: int, code: str, result: dict, quote: dict,
         lines.append(
             f"   💰 资金：主力净流入 {fmt_yi(flow.get('main_inflow'))}"
             f"（{flow.get('direction', '—')}·{flow.get('strength', '—')}）"
+        )
+
+    rows = [r for r in (flow_hist or []) if r.get("net") is not None][-20:]
+    if rows:
+        net = sum(r["net"] for r in rows) / 1e8
+        sup = sum((r.get("super_net") or 0) for r in rows) / 1e8
+        up_days = sum(1 for r in rows if r["net"] > 0)
+        lines.append(
+            f"   💧 近{len(rows)}日资金：净流入 {net:+.2f} 亿"
+            f"（流入 {up_days} 天 / 流出 {len(rows) - up_days} 天）｜ "
+            f"超大单 {sup:+.2f} 亿 ｜ 新浪口径，与主力口径不等价"
         )
 
     if chips and chips.get("available"):
@@ -466,7 +477,8 @@ def write_summary(msg: str) -> None:
 # ---------------------------------------------------------------- 主流程
 
 def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: str,
-                    chips: dict | None = None) -> dict:
+                    chips: dict | None = None,
+                    flow_hist: list | None = None) -> dict:
     """把分析结果摊平成 render_stock_card 的关键字参数（字段缺失一律给空值，别让渲染崩）。"""
     if not analysis:
         return {}
@@ -492,6 +504,7 @@ def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: 
         "signals": analysis.get("signals") or [],
         "hist": hist,
         "chips": chips or {},
+        "flow_hist": flow_hist or [],
         "generated_at": generated_at,
     }
 
@@ -535,6 +548,7 @@ def main() -> int:
         enrich_fundamental, get_real_financials, get_real_valuation,
     )
     from utils.chip_analysis import compute_chip_distribution, float_shares_from_mv
+    from utils.market_sources import sina_fetch_flow_history
 
     quotes = fetch_quotes(codes)
     analyzer = StockAnalyzer()
@@ -601,10 +615,19 @@ def main() -> int:
                 print(f"::warning::{code} 筹码计算出错：{type(exc).__name__} {exc}")
                 chips = {}
 
+        # 近一个月资金流入流出：新浪历史接口按天给净额，一次请求够画 20 根柱子
+        flow_hist: list = []
+        try:
+            flow_hist = sina_fetch_flow_history(code, days=25)
+            if flow_hist:
+                print(f"[FLOW] {code} 近 {len(flow_hist)} 日资金流已取到")
+        except Exception as exc:  # noqa: BLE001  资金流只是补充，失败不影响主结论
+            print(f"::warning::{code} 资金流历史取不到：{type(exc).__name__} {exc}")
+
         block_index = len(blocks)
-        blocks.append(format_stock(idx, code, analysis, quote, chips))
+        blocks.append(format_stock(idx, code, analysis, quote, chips, flow_hist))
         spec = build_card_spec(code, analysis, quote, hist, now.strftime("%Y-%m-%d %H:%M"),
-                               chips)
+                               chips, flow_hist)
         if spec:
             pairs.append((block_index, spec))
         ok += 1

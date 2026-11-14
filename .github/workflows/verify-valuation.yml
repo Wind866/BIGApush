@@ -33,7 +33,7 @@ jobs:
           python-version: '3.11'
 
       - name: 安装依赖
-        run: python -m pip install -q "akshare==1.20.42"
+        run: python -m pip install -q "akshare==1.20.42" "PyYAML>=6.0,<7"
 
       - name: 真实估值取数验证
         run: |
@@ -64,7 +64,9 @@ jobs:
           sys.path.insert(0, '.')
           from stock_analyzer.data_fetcher import DataFetcher
 
-          f = DataFetcher()
+          # 跳过 __init__（避免 DB/yaml 等与本检查无关的初始化依赖），
+          # get_fund_flow / get_stock_quote 不依赖 db_manager/session。
+          f = object.__new__(DataFetcher)
           codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
           ff_ok = 0
           q_ok = 0

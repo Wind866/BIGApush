@@ -121,6 +121,16 @@ class TestSchedulerReliability(unittest.TestCase):
         src = read(os.path.join("cloudflare", "worker.js"))
         self.assertIn("build: BUILD", src)
 
+    def test_schedule_audit_runs_every_day(self):
+        """PLAN 含 days: all 档期（08:43 / 22:13 周末也推），对账不能只跑工作日。"""
+        src = read(os.path.join(".github", "workflows", "schedule-audit.yml"))
+        cron = re.search(r"cron:\s*'([^']+)'", src)
+        self.assertIsNotNone(cron, "档期对账工作流缺少 cron")
+        self.assertNotIn(
+            "1-5", cron.group(1),
+            "档期对账限工作日会漏掉周末的 days: all 档期，周末漏跑无人发现",
+        )
+
 
 class TestRepoHygiene(unittest.TestCase):
     def test_gitignore_allows_tests(self):

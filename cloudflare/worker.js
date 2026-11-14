@@ -57,7 +57,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.7";
+const BUILD = "2026-11-14.8";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -902,11 +902,38 @@ export default {
       const target = chatId || (await feishuChats(env).catch(() => []))[0] || "";
       lines.push(`目标群：${target || "（没找到，配置 FEISHU_CHAT_ID 或把机器人拉进群）"}`);
       try {
-        await authHeaders(env);
-        const res = await fetch(`${API}/user`, { headers: await authHeaders(env) });
-        lines.push(`GitHub token：${res.ok ? "OK" : `失败 HTTP ${res.status}`}`);
+        const headers = await authHeaders(env);
+        const res = await fetch(`${API}/user`, { headers });
+        // classic token 会带 x-oauth-scopes；没有 workflow 就 dispatch 不了 workflow（会 403）
+        const scopes = res.headers.get("x-oauth-scopes") || "";
+        const perms = res.headers.get("x-accepted-github-permissions") || "";
+        let line = `GitHub token：${res.ok ? "OK" : `失败 HTTP ${res.status}`}`;
+        if (scopes) line += `（scopes: ${scopes}）`;
+        if (perms) line += `（可用权限: ${perms}）`;
+        lines.push(line);
+        if (res.ok && scopes && !/\bworkflow\b/.test(scopes) && !/\brepo\b/.test(scopes)) {
+          lines.push("⚠️ 这个 classic token 没有 workflow 权限，派发 workflow 会 403 —— 重新生成时勾上 workflow");
+        }
       } catch (err) {
         lines.push(`GitHub token：失败 ${err}`);
+      }
+      if (url.searchParams.get("dispatch") === "1") {
+        // 真调一次 dispatch（目标是对账工作流，只读、无副作用），用来验证 token 到底能不能派发
+        try {
+          const headers = await authHeaders(env);
+          const res = await fetch(`${API}/repos/${(env.OWNER || "Wind866").trim()}/BIGApush/actions/workflows/schedule-audit.yml/dispatches`, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({ ref: (env.BRANCH || "main").trim() }),
+          });
+          lines.push(
+            res.status === 204
+              ? "派发能力测试：OK（顺带触发了一次档期对账，只读无副作用）"
+              : `派发能力测试：失败 HTTP ${res.status} ${(await res.text()).slice(0, 140)}`
+          );
+        } catch (err) {
+          lines.push(`派发能力测试：异常 ${err}`);
+        }
       }
       if (url.searchParams.get("send") === "1") {
         if (!target) {
@@ -923,10 +950,12 @@ export default {
 
     if (url.pathname === "/health") {
       let tokenValid = null;
+      let tokenScopes = null;
       if (url.searchParams.get("check") === "1") {
         try {
           const res = await fetch(`${API}/user`, { headers: await authHeaders(env) });
           tokenValid = res.ok;
+          tokenScopes = res.headers.get("x-oauth-scopes") || (res.ok ? "(fine-grained, 无 scopes 头)" : "");
         } catch {
           tokenValid = false;
         }
@@ -941,6 +970,7 @@ export default {
         targets: PLAN.flatMap((s) => s.targets).length,
         schedule: PLAN.map((s) => `${s.at} ${s.name} [${s.targets.length}]`),
         tokenValid,
+        tokenScopes,
         alertConfigured: Boolean((env.ALERT_WEBHOOK || "").trim()),
         feishuApp: Boolean((env.FEISHU_APP_ID || "").trim()),
         feishuPollEveryMin: POLL_EVERY_MIN,

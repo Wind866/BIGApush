@@ -108,10 +108,10 @@ class StockAnalyzer:
         # 趋势判断（权重最高）
         if trend == "上升趋势":
             score += 2
-            reasons.append("趋势向上（MA5>MA20）")
+            reasons.append("趋势向上（均线多头排列）")
         elif trend == "下降趋势":
             score -= 2
-            reasons.append("趋势向下（MA5<MA20）")
+            reasons.append("趋势向下（均线空头排列）")
         else:
             reasons.append("趋势横盘整理")
         
@@ -197,51 +197,64 @@ class StockAnalyzer:
         trend_map = {"上升": "上升趋势", "下降": "下降趋势", "震荡": "横盘"}
         trend = trend_map.get(raw_trend, raw_trend)
 
-        # 从趋势强度推断 MACD 状态
+        # 真实指标状态（MACD/KDJ/布林带）优先；取不到时再回退到旧的推断逻辑
+        indicator = raw.get("indicator_analysis") or {}
         strength = trend_analysis.get("strength", 0)
-        if raw_trend == "上升" and strength >= 3:
-            macd_status = "多头"
-        elif raw_trend == "上升":
-            macd_status = "金叉"
-        elif raw_trend == "下降" and strength >= 3:
-            macd_status = "空头"
-        elif raw_trend == "下降":
-            macd_status = "死叉"
-        else:
-            macd_status = "未知"
 
-        # 从动量分析中提取 RSI 水平，映射为 KDJ 状态
+        macd_status = (indicator.get("macd") or {}).get("status") or ""
+        if not macd_status or macd_status == "未知":
+            # 旧逻辑：从趋势强度反推（数据不足时的降级路径）
+            if raw_trend == "上升" and strength >= 3:
+                macd_status = "多头"
+            elif raw_trend == "上升":
+                macd_status = "金叉"
+            elif raw_trend == "下降" and strength >= 3:
+                macd_status = "空头"
+            elif raw_trend == "下降":
+                macd_status = "死叉"
+            else:
+                macd_status = "未知"
+
         momentum = raw.get("momentum_analysis", {})
-        rsi_level = momentum.get("rsi_level", "中性")
-        kdj_map = {"超买": "超买", "超卖": "超卖", "中性": "中性"}
-        kdj_status = kdj_map.get(rsi_level, "中性")
+        kdj_status = (indicator.get("kdj") or {}).get("status") or ""
+        if not kdj_status or kdj_status == "未知":
+            # 旧逻辑：以 RSI 水平近似 KDJ
+            kdj_status = {"超买": "超买", "超卖": "超卖", "中性": "中性"}.get(
+                momentum.get("rsi_level", "中性"), "中性")
 
-        # 波动率分析（布林带宽度判断通道状态）
-        volatility = raw.get("volatility_analysis", {})
-        bb_width = volatility.get("bb_width", 0)
-        vol_level = volatility.get("volatility_level", "低")
-        # 高波动率 + 宽布林带 → 可能突破
-        if vol_level == "高" and bb_width > 15:
-            bollinger_status = "突破上轨" if raw_trend == "上升" else "突破下轨"
-        else:
-            bollinger_status = "通道内"
+        bollinger_status = (indicator.get("bollinger") or {}).get("status") or ""
+        if not bollinger_status or bollinger_status == "未知":
+            # 旧逻辑：高波动率 + 宽布林带 → 可能突破
+            volatility = raw.get("volatility_analysis", {})
+            bb_width = volatility.get("bb_width", 0)
+            vol_level = volatility.get("volatility_level", "低")
+            if vol_level == "高" and bb_width > 15:
+                bollinger_status = "突破上轨" if raw_trend == "上升" else "突破下轨"
+            else:
+                bollinger_status = "通道内"
 
-        # 技术评分转换为 RSI 数值（0-100 映射）
+        # RSI 用真实数值；取不到才退回技术评分（旧行为）
         technical_score = raw.get("technical_score", 50)
-        rsi_value = float(technical_score)
+        rsi_real = momentum.get("rsi")
+        rsi_value = float(rsi_real) if isinstance(rsi_real, (int, float)) else float(technical_score)
 
         return {
             "trend": trend,
             "indicators": {
                 "MACD": macd_status,
                 "KDJ": kdj_status,
-                "RSI": rsi_value,
+                "RSI": round(rsi_value, 2),
                 "Bollinger": bollinger_status
             },
             "patterns": [],
             # 保留原始详细数据
             "technical_score": technical_score,
-            "technical_opinion": raw.get("technical_opinion", "中性")
+            "technical_opinion": raw.get("technical_opinion", "中性"),
+            "indicator_detail": {
+                "macd": indicator.get("macd") or {},
+                "kdj": indicator.get("kdj") or {},
+                "bollinger": indicator.get("bollinger") or {},
+            }
         }
 
     

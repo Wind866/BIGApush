@@ -149,13 +149,23 @@ artifact；发现已覆盖范围内有漏跑就让任务失败、走告警。
 除了「准点触发」，本 Worker 还兼了一个入口：群里发 `600519`，机器人回该股的深度分析。
 
 ```
-群里发「600519,000001」
-      ↓ 飞书事件 im.message.receive_v1
-Worker POST /feishu  ← 你填进开放平台的事件订阅地址
+群里 @机器人 发「600519,000001」
+      ↓ Worker 每 2 分钟主动调「获取会话历史消息」   ← 不需要任何公网回调地址
+      ↓ 筛出「@了机器人」且含 6 位数字的消息
       ↓ 先回一句「已收到，约 1~2 分钟」
-      ↓ dispatch BIGApush/stock-query.yml（带 inputs.stocks）
-GitHub Actions 跑真实取数 → 结论推回群（走 FEISHU_WEBHOOK）
+      ↓ dispatch BIGApush/stock-query.yml（带 inputs.stocks 和 chat_id）
+GitHub Actions 跑真实取数 → 结论推回提问的那个群
 ```
+
+> **为什么不用事件订阅（回调）**
+>
+> 回调要求一个国内可访问的 HTTPS 地址，而 `*.workers.dev` 实测全国 200+ 节点全部超时
+> （只有港澳台通）。飞书的回调服务器在国内机房，请求根本发不出来，表现为
+> 「请求 3 秒超时」或「url invalid」。换成自建域名能解决，但要买域名、改 NS、等生效。
+>
+> 轮询是反过来的：Worker 每分钟本来就被 cron 唤醒，顺手调一次飞书接口读消息。
+> **不依赖任何入站请求**，因此不需要域名、证书、事件订阅，也不会撞上 3 秒超时。
+> 代价是**最多延迟 2 分钟**（`POLL_EVERY_MIN`）。
 
 ### 为什么必须用自建应用
 
@@ -170,9 +180,10 @@ GitHub Actions 跑真实取数 → 结论推回群（走 FEISHU_WEBHOOK）
 
 | 权限 | 用途 |
 | --- | --- |
-| `im:message` | 读取群消息（收事件必需） |
+| `im:message` | 收发群消息 |
 | `im:message:send_as_bot` | 以机器人身份发回执 |
-| `im:chat:readonly` | 可选，仅用于排查「机器人在哪些群」 |
+| `im:message.group_msg` | **轮询读群历史消息必需**（敏感权限，自建应用自己审批即可） |
+| `im:chat:readonly` | 可选，自动发现机器人所在的群；配了 `FEISHU_CHAT_ID` 就不需要 |
 
 开完要**发布版本**（创建版本 → 申请发布），权限才生效。只加权限不发布 = 仍然 99991672。
 
@@ -180,21 +191,18 @@ GitHub Actions 跑真实取数 → 结论推回群（走 FEISHU_WEBHOOK）
 
 应用功能 → 机器人 → 开启；然后把这个机器人**拉进目标群**（群里 @ 它或从群设置添加）。
 
-**3. 配事件订阅**
+**3. 事件订阅：轮询模式下不需要，可整节跳过**
 
-事件与回调 → 订阅方式选「**将事件发送至开发者服务器**」：
+只有在你自己有域名、并把域名绑到 Worker 之后才值得配：
 
-- 请求地址：`https://<你的 Worker 域名>/feishu`
+- 事件与回调 → 订阅方式选「将事件发送至开发者服务器」
+- 请求地址：`https://<你的域名>/feishu`（不要用 `*.workers.dev`，国内不通）
 - 添加事件：`接收消息 im.message.receive_v1`
 
-保存时飞书会立刻打一发 `url_verification`，本 Worker 会原样回 `challenge`，
-**保存成功就说明地址通了**。若这里报失败，先 `curl https://<域名>/feishu` 应返回一句说明文字。
+保存时飞书会打一发 `url_verification`，本 Worker 原样回 `challenge`，保存成功即地址通。
+加密策略保持默认不填最省事；若开了，需同步 `npx wrangler secret put FEISHU_ENCRYPT_KEY`。
 
-加密策略保持默认（不填 Encrypt Key）最省事；若一定要开，把 Encrypt Key 也配到 Worker：
-
-```bash
-npx wrangler secret put FEISHU_ENCRYPT_KEY
-```
+轮询与回调**可以同时开着**，`message_id` / `event_id` 各自去重，不会重复触发分析。
 
 **4. 给 Worker 配 Secret**
 
@@ -210,6 +218,8 @@ npx wrangler deploy
 ### 行为说明
 
 - 只认**文本消息里的 6 位连续数字**；闲聊不回应（避免机器人在群里刷屏）
+- **必须 @ 机器人**：群里别人发的 6 位数字（订单号、金额）不会被当成股票代码
+- 轮询按 `message_id` 去重，同一条消息只处理一次；回调按 `event_id` 去重
 - 一次最多 6 只，超出部分丢弃并在回执里体现
 - 同一组代码 90 秒内只触发一次；飞书重投的同一 `event_id` 直接忽略
 - 非文本消息（图片/文件）回一句「只认文本股票代码」
@@ -221,9 +231,33 @@ npx wrangler deploy
 
 ### 自检
 
+**先跑这条**，报告会直接显示在浏览器里，比看日志快：
+
+```
+https://<域名>/feishu/poll
+```
+
+正常长这样（`扫描群数` 为 0 说明机器人还没被拉进群）：
+
+```
+机器人：BIGApush open_id=ou_xxxx
+扫描群数：1
+  oc_xxxxxxxx 最近 3 条
+本次处理 0 条查询
+```
+
+常见报错对应：
+
+| 报错 | 原因 |
+| --- | --- |
+| `im/v1/chats 失败 99991672` | 权限没开或没发布版本（`im:chat:readonly`） |
+| `im/v1/messages 失败 99991672` | 缺 `im:message.group_msg` 或没发布版本 |
+| `bot/v3/info 失败 ...` | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 配错 |
+| `扫描群数：0` | 机器人不在任何群里，先拉进群 |
+
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-14.2 或更新，确认线上跑的是这版
-curl https://<域名>/feishu            # 应返回「飞书事件回调端点（接收 POST）」
+curl https://<域名>/health            # build 字段应为 2026-11-14.3 或更新，确认线上跑的是这版
+curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 
 线上版本不对是最常见的「代码改了没生效」原因，`/health` 的 `build` 就是为此加的。

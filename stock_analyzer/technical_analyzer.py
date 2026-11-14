@@ -285,7 +285,8 @@ class TechnicalAnalyzer:
             return {
                 "momentum": 0,
                 "momentum_strength": "弱",
-                "rsi_level": "中性"
+                "rsi_level": "中性",
+                "rsi": None
             }
         
         # 计算动量指标
@@ -310,19 +311,24 @@ class TechnicalAnalyzer:
         
         # 分析RSI水平
         rsi_level = "中性"
+        latest_rsi = None
         if 'rsi' in data.columns:
-            latest_rsi = data['rsi'].iloc[-1]
-            if latest_rsi > 70:
+            raw_rsi = data['rsi'].iloc[-1]
+            if pd.notna(raw_rsi):
+                latest_rsi = round(float(raw_rsi), 2)
+            if latest_rsi is not None and latest_rsi > 70:
                 rsi_level = "超买"
-            elif latest_rsi < 30:
+            elif latest_rsi is not None and latest_rsi < 30:
                 rsi_level = "超卖"
         
         return {
             "momentum": momentum,
             "momentum_strength": momentum_strength,
-            "rsi_level": rsi_level
+            "rsi_level": rsi_level,
+            # 真实 RSI 数值（此前前端拿 technical_score 当 RSI 展示）
+            "rsi": latest_rsi
         }
-    
+
     def analyze_volume(self, data: pd.DataFrame) -> Dict[str, Any]:
         """分析成交量
         
@@ -368,6 +374,133 @@ class TechnicalAnalyzer:
             "volume_ratio": volume_ratio
         }
     
+    def analyze_macd(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """MACD 真实状态：金叉/死叉/多头/空头
+
+        此前前端展示的 MACD 是由「趋势强度」反推的，横盘时只能显示「未知」。
+        这里直接看 DIF/DEA 与近两日柱状值变化，给出可解释的真实状态。
+
+        Args:
+            data: 历史行情数据
+
+        Returns:
+            dict: {status, dif, dea, hist, cross}
+        """
+        empty = {"status": "未知", "dif": None, "dea": None, "hist": None, "cross": None}
+        if data is None or data.empty:
+            return empty
+
+        df = self.calculate_macd(data.copy())
+        if len(df) < 2:
+            return empty
+
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        dif, dea, hist = latest['macd'], latest['signal'], latest['hist']
+        prev_hist = prev['hist']
+        if pd.isna(dif) or pd.isna(dea) or pd.isna(hist) or pd.isna(prev_hist):
+            return empty
+
+        cross = None
+        if prev_hist <= 0 < hist:
+            status, cross = "金叉", "金叉"
+        elif prev_hist >= 0 > hist:
+            status, cross = "死叉", "死叉"
+        elif dif > dea:
+            status = "多头"
+        elif dif < dea:
+            status = "空头"
+        else:
+            status = "中性"
+
+        return {
+            "status": status,
+            "dif": round(float(dif), 3),
+            "dea": round(float(dea), 3),
+            "hist": round(float(hist), 3),
+            "cross": cross,
+        }
+
+    def analyze_kdj(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """KDJ 真实状态：超买/超卖/金叉/死叉/中性
+
+        Args:
+            data: 历史行情数据
+
+        Returns:
+            dict: {status, k, d, j, cross}
+        """
+        empty = {"status": "未知", "k": None, "d": None, "j": None, "cross": None}
+        if data is None or data.empty or len(data) < 9:
+            return empty
+
+        df = self.calculate_kdj(data.copy())
+        latest = df.iloc[-1]
+        k, d, j = latest['k'], latest['d'], latest['j']
+        if pd.isna(k) or pd.isna(d) or pd.isna(j):
+            return empty
+
+        cross = None
+        if len(df) >= 2:
+            prev = df.iloc[-2]
+            if pd.notna(prev['k']) and pd.notna(prev['d']):
+                if prev['k'] <= prev['d'] and k > d:
+                    cross = "金叉"
+                elif prev['k'] >= prev['d'] and k < d:
+                    cross = "死叉"
+
+        # 超买/超卖优先（风险提示更重要），其次看交叉
+        if k > 80:
+            status = "超买"
+        elif k < 20:
+            status = "超卖"
+        elif cross:
+            status = cross
+        else:
+            status = "中性"
+
+        return {
+            "status": status,
+            "k": round(float(k), 2),
+            "d": round(float(d), 2),
+            "j": round(float(j), 2),
+            "cross": cross,
+        }
+
+    def analyze_bollinger(self, data: pd.DataFrame) -> Dict[str, Any]:
+        """布林带位置：突破上轨/突破下轨/通道内
+
+        Returns:
+            dict: {status, upper, mid, lower, bb_width}
+        """
+        empty = {"status": "未知", "upper": None, "mid": None, "lower": None, "bb_width": None}
+        if data is None or data.empty or len(data) < 20:
+            return empty
+
+        df = self.calculate_bollinger_bands(data.copy())
+        latest = df.iloc[-1]
+        for col in ('bb_upper', 'bb_mid', 'bb_lower', 'close'):
+            if col not in df.columns or pd.isna(latest[col]):
+                return empty
+
+        close, upper, mid, lower = (latest['close'], latest['bb_upper'],
+                                    latest['bb_mid'], latest['bb_lower'])
+        if close >= upper:
+            status = "突破上轨"
+        elif close <= lower:
+            status = "突破下轨"
+        else:
+            status = "通道内"
+
+        width = (upper - lower) / mid * 100 if mid else 0
+        return {
+            "status": status,
+            "upper": round(float(upper), 2),
+            "mid": round(float(mid), 2),
+            "lower": round(float(lower), 2),
+            "bb_width": round(float(width), 2),
+        }
+
     def comprehensive_technical_analysis(self, data: pd.DataFrame) -> Dict[str, Any]:
         """综合技术分析
         
@@ -383,6 +516,11 @@ class TechnicalAnalyzer:
                 "volatility_analysis": self.analyze_volatility(data),
                 "momentum_analysis": self.analyze_momentum(data),
                 "volume_analysis": self.analyze_volume(data),
+                "indicator_analysis": {
+                    "macd": self.analyze_macd(data),
+                    "kdj": self.analyze_kdj(data),
+                    "bollinger": self.analyze_bollinger(data),
+                },
                 "technical_score": 0,
                 "technical_opinion": "数据不足"
             }
@@ -392,6 +530,12 @@ class TechnicalAnalyzer:
         volatility_analysis = self.analyze_volatility(data)
         momentum_analysis = self.analyze_momentum(data)
         volume_analysis = self.analyze_volume(data)
+        # 真实指标状态（MACD/KDJ/布林带），供前端直接展示，无需再由趋势反推
+        indicator_analysis = {
+            "macd": self.analyze_macd(data),
+            "kdj": self.analyze_kdj(data),
+            "bollinger": self.analyze_bollinger(data),
+        }
         
         # 计算技术分析评分（0-100）
         technical_score = 50  # 基础分
@@ -435,6 +579,7 @@ class TechnicalAnalyzer:
             "volatility_analysis": volatility_analysis,
             "momentum_analysis": momentum_analysis,
             "volume_analysis": volume_analysis,
+            "indicator_analysis": indicator_analysis,
             "technical_score": technical_score,
             "technical_opinion": technical_opinion
         }

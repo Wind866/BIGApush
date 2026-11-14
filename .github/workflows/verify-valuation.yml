@@ -116,3 +116,34 @@ jobs:
           print("RESULT_MA200:", f"{bars_ok}/{len(codes)} 行情≥200根")
           print("RESULT_TREND:", f"{trend_ok}/{len(codes)} 趋势已判定")
           PY
+
+      - name: 技术指标真实值(MACD/KDJ/BOLL/RSI) 验证
+        run: |
+          python - <<'PY'
+          import json, sys
+          sys.path.insert(0, '.')
+          from stock_analyzer import StockAnalyzer
+          from stock_analyzer.data_fetcher import DataFetcher
+          from stock_analyzer.technical_analyzer import TechnicalAnalyzer
+
+          # 验证 MACD/KDJ/布林带/RSI 是真实计算值，而非由趋势强度反推
+          f = object.__new__(DataFetcher)
+          f.DEFAULT_STOCK_LIST = {}
+          sa = object.__new__(StockAnalyzer)
+          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          ok = 0
+          for code in codes:
+              q = f.get_stock_quote(code, '400d')
+              raw = TechnicalAnalyzer().comprehensive_technical_analysis(q)
+              tech = StockAnalyzer._convert_technical_result(sa, raw)
+              ind = tech['indicators']
+              detail = tech.get('indicator_detail', {})
+              good = (ind['MACD'] in ('金叉', '死叉', '多头', '空头')
+                      and ind['KDJ'] in ('超买', '超卖', '金叉', '死叉', '中性')
+                      and ind['Bollinger'] in ('突破上轨', '突破下轨', '通道内')
+                      and isinstance(ind['RSI'], float) and detail.get('macd', {}).get('dif') is not None)
+              ok += 1 if good else 0
+              print(f"[IND] {code}: {json.dumps(ind, ensure_ascii=False)} "
+                    f"detail={json.dumps(detail, ensure_ascii=False)} ok={good}")
+          print("RESULT_IND :", f"{ok}/{len(codes)} 指标为真实计算值")
+          PY

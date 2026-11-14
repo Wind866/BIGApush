@@ -170,12 +170,12 @@ class QuantSystem:
         print("\n✓ 数据更新完成")
 
     def update_data(self, max_stocks=None):
-        """每日增量更新"""
-        print("=" * 60)
-        print("🔄 每日增量更新")
-        print("=" * 60)
-        self.fetcher.daily_update(max_stocks=max_stocks)
-        print("\n✓ 数据更新完成")
+        """每日增量更新（显式调用，不做「收盘前不更新」的短路）"""
+        # 这里原本调 self.fetcher.daily_update()，而 AKShareFetcher 根本没有这个方法——
+        # 也就是说这条路径从来就没成功过。它只被 Web 界面的「更新数据」按钮用到，
+        # 报错还被后台线程的 except 吞成一句状态文案，所以一直没人发现。
+        # 真正的增量入口是 init_full_data(incremental=True)，与 _smart_update 同一条路。
+        self.fetcher.init_full_data(max_stocks=max_stocks, incremental=True)
 
     def select_stocks(self, category='all', max_stocks=None, return_data=False):
         """执行选股
@@ -196,7 +196,7 @@ class QuantSystem:
         
         if not self.registry.list_strategies():
             print("✗ 没有找到可用策略")
-            return {}, {}
+            return ({}, {}, {}) if return_data else ({}, {})
         
         print(f"已加载 {len(self.registry.list_strategies())} 个策略")
         
@@ -229,7 +229,11 @@ class QuantSystem:
 
         if not stock_codes:
             print("✗ 没有股票数据，请先执行 init 或 update")
-            return {}, {}
+            # 不能只返回二元组：run_full 按 (results, stock_names, stock_data_dict) 解包，
+            # 少一个值会变成 "not enough values to unpack"，把「库是空的」这条可执行的
+            # 提示淹在 traceback 里。return_data 决定元数，两个分支都必须对齐。
+            self.last_universe_stats = {'usable': 0, 'reference_date': None}
+            return ({}, {}, {}) if return_data else ({}, {})
 
         print(f"共 {len(stock_codes)} 只股票")
 
@@ -807,6 +811,18 @@ B1完美图形匹配:
                 result = quant.run_full(category=args.category, max_stocks=args.max_stocks)
 
             # 飞书推送
+            # 空 dict 只可能来自「没有策略 / 没有股票数据」这两个硬故障，不是「今天没信号」。
+            # 后者会返回带空列表的 dict（走下面正常推送，卡片里写明无信号）。
+            # 这里必须显式失败：否则整段推送被跳过、进程退出码 0，Actions 变绿却一条消息都没有，
+            # 正是本项目一直想消灭的「假绿」。DB 缓存被清、init 失败时最容易撞上。
+            if not result:
+                msg = ("选股结果为空（没有可用策略或股票数据），本次未推送。"
+                       "请先执行 `python main.py init`，或检查 Actions 的数据库缓存是否已失效。")
+                if os.environ.get("CI"):
+                    print(f"::error::{msg}")
+                    sys.exit(1)
+                print(f"::warning::{msg}")
+                sys.exit(1)
             if result:
                 from utils.feishu_notifier import FeishuNotifier
                 feishu_cfg = quant.config.get('feishu', {})

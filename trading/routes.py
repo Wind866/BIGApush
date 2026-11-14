@@ -1,6 +1,12 @@
 """
 回测API路由 - 提供RESTful接口
 """
+# json / datetime 是本模块里多个接口（批量任务列表读 queue_*.json、执行方案导入导出）
+# 直接使用的标准库。此前只在函数内 from uuid import uuid4，却漏了这两个，
+# 于是这些接口恒定失败，异常又被 except 吞成一句「读取失败」，看起来像"没有数据"。
+import datetime
+import json
+
 from flask import Blueprint, request, jsonify, send_file
 from trading.backtest_dao import BacktestDAO
 from trading.backtest_engine import BacktestEngine
@@ -2112,10 +2118,6 @@ def export_selection():
 
             if strategy_name not in strategy_stats:
                 strategy_stats[strategy_name] = {'count': 0, 'stocks': []}
-
-            if Array.isArray(signals) if 'Array' in dir() else isinstance(signals, list):
-                strategy_stats[strategy_name]['count'] = len(signals)
-                strategy_stats[strategy_name]['stocks'] = signals
 
             if isinstance(signals, list):
                 strategy_stats[strategy_name]['count'] = len(signals)

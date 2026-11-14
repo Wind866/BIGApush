@@ -730,9 +730,40 @@ def fetch_board_em(kind: str, sort_field: str = "f3",
 # 健康自检探针（供 check_sources.py 使用）
 # ---------------------------------------------------------------------------
 
+def _pool_probe(fetch: Any, what: str) -> str:
+    """涨停池探针：**非交易日 / 开盘前为空是正常现象，不是故障**。
+
+    自检固定在每周一 09:00（北京时间）跑，那时集合竞价都没结束，涨停池当然是空的；
+    周末和节假日更是必然为空。此前探针直接取「今天」的池子，于是每周一的自检
+    都会固定报一条 FAIL，把真正的故障淹在噪音里。
+
+    现在按「今天 → 往前回看最近的交易日」取到第一个非空的池子，并在说明里
+    写明回看的是哪一天；只有**今天这个请求本身失败**，或者最近 8 天全空，
+    才算真故障，仍然照常报错。
+    """
+    day = dt.datetime.now(BJ).date()
+    last_error: Exception | None = None
+    for back in range(8):
+        d = day - dt.timedelta(days=back)
+        if d.weekday() >= 5:          # 周末不可能是交易日，不必白跑一次请求
+            continue
+        try:
+            items = fetch(d).get("items") or []
+        except Exception as exc:      # noqa: BLE001
+            if back == 0:
+                raise                 # 今天都取不到 → 真故障，不拿历史数据掩盖
+            last_error = exc
+            continue
+        if items:
+            note = "" if back == 0 else f"（回看 {d.isoformat()}）"
+            return f"{len(items)} 只{note}"
+    if last_error is not None:
+        raise last_error
+    raise s.SourceFailure(f"{what}：最近 8 天均为空，接口可能已变更")
+
+
 def probes() -> list[tuple[str, str, str, str, Any]]:
     """返回 (分组, 供应商, 中文名, 接口, 调用)。只读探测，不产生任何信号。"""
-    day = dt.datetime.now(BJ).date()
     codes = ["300528", "600519"]
     secids = ["0.300528", "1.600519"]
     return [
@@ -743,9 +774,9 @@ def probes() -> list[tuple[str, str, str, str, Any]]:
         ("snapshot", "eastmoney_clist", "东财榜单通道（同口径备 1）", "push2 · clist",
          lambda: f"{len(s.em_fetch_quotes_clist(secids))} 只"),
         ("snapshot", "eastmoney", "东财涨停池（交叉校验）", "push2ex · ZTPool",
-         lambda: f"{len(s.em_fetch_pool('ZT', day)['items'])} 只"),
+         lambda: _pool_probe(lambda d: s.em_fetch_pool('ZT', d), "东财涨停池")),
         ("snapshot", "ths", "同花顺涨停池（备 2）", "data.10jqka.com.cn",
-         lambda: f"{len(s.ths_fetch_limit_up(day)['items'])} 只"),
+         lambda: _pool_probe(s.ths_fetch_limit_up, "同花顺涨停池")),
         ("snapshot", "sina", "新浪全市场涨幅榜（备 3）", "Market_Center.getHQNodeData",
          lambda: f"{len(sina_strong_stocks(8.0, 1)[0])} 只"),
         ("snapshot", "sina", "新浪逐票行情（备 4）", "hq.sinajs.cn",

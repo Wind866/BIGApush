@@ -2089,7 +2089,13 @@ def trigger_update():
             emit_update_progress()
             
             # 执行更新
-            quant_system.update_data(max_stocks=max_stocks)
+            # 模块级 quant_system 已被注释掉（避免启动时就初始化数据库而报错），
+            # 这里原本直接引用它，导致「更新数据」按钮 100% 失败，报错还是
+            # `name 'quant_system' is not defined` 这种看不懂的 NameError。
+            # 改成在后台线程里按需实例化：失败只影响这一次更新，不会拖垮 Web 启动。
+            from main import QuantSystem
+
+            QuantSystem("config/config.yaml").update_data(max_stocks=max_stocks)
             
             update_status['success'] += 1
             update_status['message'] = '数据更新完成'

@@ -90,7 +90,12 @@ jobs:
       - name: 初始化数据（首次运行）
         if: (steps.trading.outputs.is_trading == 'true' || inputs.force == true) && steps.check-db.outputs.exists == 'false'
         run: python main.py init
-        timeout-minutes: 45
+        # 冷启动预算：job 上限 90 分钟。原先这里 45 + 下面的 run 75 最多要 120 分钟，
+        # 一旦数据源偏慢，整个 job 会被直接砍掉——初始化白跑、缓存也没保存下来，
+        # 于是第二天再从零来一遍（等于每天白烧一小时 Actions 额度）。
+        # 现在 init 给 55 分钟，且冷启动时下面那步跳过增量更新（init 刚抓完就是最新），
+        # 实际路径约 55 + 20 = 75 分钟内。
+        timeout-minutes: 55
 
       - name: 运行收盘选股并推送
         if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
@@ -98,7 +103,9 @@ jobs:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
-          SKIP_DATA_UPDATE: ${{ inputs.skip_update && '1' || '0' }}
+          # 冷启动（库不存在）刚跑完 init，数据已是最新；再走一遍增量更新纯属重复耗时，
+          # 而且正是它把冷启动推到 90 分钟上限之外。
+          SKIP_DATA_UPDATE: ${{ (inputs.skip_update || steps.check-db.outputs.exists == 'false') && '1' || '0' }}
         run: python main.py run
         # 实测最长 51.9 分钟（数据更新 30 分 + 选股推送 20 分），原来 55 分只剩 3 分余量，
         # 数据源一慢就整档被砍；提到 75 分（job 90 分内，仍留 15 分给收尾与推送）

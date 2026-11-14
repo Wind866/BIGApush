@@ -104,9 +104,11 @@ def send_feishu(msg):
 def main():
     now = datetime.now(BJ_TZ)
     lines = []
+    # --dry-run：只生成消息并打印，不推送、不写台账（见 evening_news.py 同名参数）
+    dry_run = "--dry-run" in sys.argv
 
     # 未配置 webhook 时直接跳过，避免日志出现「推送成功」造成误导
-    if not os.environ.get("FEISHU_WEBHOOK", "").strip():
+    if not os.environ.get("FEISHU_WEBHOOK", "").strip() and not dry_run:
         msg = "FEISHU_WEBHOOK 未配置，跳过本次推送（请在仓库 Secrets 中配置）"
         if os.environ.get("CI"):
             print(f"::error::{msg}")
@@ -117,8 +119,8 @@ def main():
     # 幂等守卫：外部准点触发 + GitHub cron 延迟触发，同一档期只推一次。
     # 只认「飞书确实推送成功」写入的台账，调试/跳过运行不会误杀当天的真实推送。
     force = "--force" in sys.argv or os.environ.get("FORCE_PUSH", "").strip().lower() in ("1", "true", "yes")
-    if should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR,
-                   slot_hour=EDITION_SLOT_HOUR):
+    if not dry_run and should_skip(WORKFLOW_FILE, force=force, cutoff_hour=EDITION_CUTOFF_HOUR,
+                                   slot_hour=EDITION_SLOT_HOUR):
         return
 
     # 标题
@@ -165,6 +167,11 @@ def main():
 
     # 发送
     msg = "\n".join(lines)
+    if dry_run:
+        print("---- 消息预览（--dry-run，未推送）----")
+        print(msg)
+        print("------------------------------------")
+        return
     if send_feishu(msg):
         print(f"✅ 早间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
         mark_pushed(WORKFLOW_FILE, cutoff_hour=EDITION_CUTOFF_HOUR, slot_hour=EDITION_SLOT_HOUR)

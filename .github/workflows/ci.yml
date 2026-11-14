@@ -29,7 +29,7 @@ jobs:
           python-version: '3.11'
 
       - name: 安装校验依赖
-        run: python -m pip install -q "PyYAML>=6.0,<7"
+        run: python -m pip install -q "PyYAML>=6.0,<7" pyflakes
 
       - name: Python 全仓库语法检查
         run: python -m compileall -q .
@@ -58,6 +58,19 @@ jobs:
 
       - name: 单元测试
         run: python -m unittest discover -s tests -v
+
+      # 未定义名 = 一旦走到那条分支就 NameError。compileall 和单测都发现不了，
+      # 因为出问题的往往是异常处理分支（真出事时才执行）。
+      # 本项目实际踩过：trading/routes.py 缺 import json/datetime，
+      # 「批量任务列表」和「方案导入导出」三个接口一直是坏的，却只表现为「没有数据」。
+      - name: 未定义名检查（pyflakes）
+        run: |
+          python -m pyflakes $(git ls-files '*.py' | grep -v '^trading/ptrade/') > /tmp/pyflakes.txt || true
+          if grep -E "undefined name|undefined local" /tmp/pyflakes.txt; then
+            echo "::error::存在未定义变量，运行到该分支会 NameError"
+            exit 1
+          fi
+          echo "未发现未定义变量（trading/ptrade 是券商平台模板，其全局由平台注入，已排除）"
 
       # 曾经的 P0：strategy/pattern_config.py 把配置路径写死成 /root/quant-csv/...，
       # 云端 runner（非 root 用户）上 Path.exists() 抛 PermissionError，导致

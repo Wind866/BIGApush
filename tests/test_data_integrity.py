@@ -374,5 +374,86 @@ class TestHostNormalization(unittest.TestCase):
                 os.environ["WEB_ALLOWED_HOSTS"] = old
 
 
+class TestNoSilentFailure(unittest.TestCase):
+    """「跑完了、绿了、但没有消息 / 功能永远用不了」这一类缺陷。
+
+    这批问题的共同点是**不会崩**：异常被 except 吞成一句日志，或者返回值解包错位
+    只在空库时才触发。用源码级断言钉住，避免下次重构又改回去。
+    """
+
+    def test_select_stocks_early_returns_keep_arity(self):
+        """早退分支必须按 return_data 返回 2 或 3 个值。
+
+        历史上两处 `return {}, {}` 在 `return_data=True` 时被
+        `results, stock_names, stock_data_dict = ...` 解包，
+        于是「库是空的」这条可执行提示变成一句
+        `ValueError: not enough values to unpack (expected 3, got 2)`。
+        """
+        tree = ast.parse(read_source("main.py"))
+        fn = next(
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "select_stocks"
+        )
+        early = [
+            n for n in fn.body
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple)
+            and len(n.value.elts) == 2
+            and all(isinstance(e, ast.Dict) and not e.keys for e in n.value.elts)
+        ]
+        self.assertEqual(early, [], "select_stocks 里仍有固定返回二元组的早退分支")
+
+    def test_run_command_fails_when_result_is_empty(self):
+        """`main.py run` 拿到空结果必须非零退出，不能绿着什么都不发。"""
+        src = read_source("main.py")
+        self.assertIn("选股结果为空", src)
+        # 空结果分支后面必须紧跟 sys.exit(1)
+        idx = src.find("选股结果为空")
+        self.assertGreater(idx, 0)
+        tail = src[idx:idx + 900]
+        self.assertIn("sys.exit(1)", tail, "空结果分支没有让进程失败")
+
+    def test_trading_routes_imports_stdlib_it_uses(self):
+        """routes.py 用到 json / datetime，就必须在模块顶层导入。
+
+        缺导入时异常被 `except Exception` 吞掉：批量任务列表永远空、
+        执行方案导入导出永远失败，表现都像「没有数据」而不是「代码坏了」。
+        """
+        tree = ast.parse(read_source("trading/routes.py"))
+        names = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                names.update(a.name.split(".")[0] for a in node.names)
+        for required in ("json", "datetime"):
+            self.assertIn(required, names, f"trading/routes.py 缺少 `import {required}`")
+
+    def test_api_update_does_not_use_commented_out_object(self):
+        """`quant_system` 已被注释掉，/api/update 再直接引用它就必然失败。"""
+        src = read_source("web_server.py")
+        self.assertNotIn("quant_system.update_data", src)
+        self.assertIn('QuantSystem("config/config.yaml").update_data', src)
+
+    def test_no_leftover_javascript_in_python(self):
+        """Python 里不该出现 Array.isArray 这种 JS 残留表达式。"""
+        for rel in ("trading/routes.py", "web_server.py"):
+            self.assertNotIn("Array.isArray", read_source(rel), f"{rel} 含 JS 残留代码")
+
+    def test_pool_probe_looks_back_to_previous_trading_day(self):
+        """涨停池探针必须回看最近交易日，否则周一 09:00 的自检固定假故障。"""
+        src = read_source("utils/biga_sources.py")
+        self.assertIn("_pool_probe", src)
+        self.assertIn("回看", src)
+
+    def test_nested_template_copy_is_gone(self):
+        """web/static/static、web/templates/templates 是不可达的陈旧副本。
+
+        它们曾经真实存在：改了 web/static/js 不生效时，很难想到还有第二份。
+        """
+        for dead in ("web/static/static", "web/templates/templates"):
+            self.assertFalse(
+                os.path.exists(os.path.join(ROOT, dead)),
+                f"{dead} 是不可达的重复副本，不应存在",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

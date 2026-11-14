@@ -1,8 +1,10 @@
 # ============================================
 # A股量化选股系统 - 主配置文件
 # ============================================
-# 说明：此文件由 config.yaml.template 生成
-# 不要提交此文件到Git仓库（已加入.gitignore）
+# 说明：此文件由 config.yaml.template 生成，并且**是入库文件**（clone 即可运行）。
+# 因为已跟踪，.gitignore 对它不生效 —— 也就是说，在这里写的东西一定会被提交。
+# 所以 webhook 之类的密钥一律不能写进本文件：CI 有硬门禁扫描真实 webhook，
+# 一旦提交会直接让测试变红（tests/test_smoke.py::test_no_real_webhook_committed）。
 
 data_dir: data
 

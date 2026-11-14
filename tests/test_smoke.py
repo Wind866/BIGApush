@@ -140,6 +140,46 @@ class TestRepoHygiene(unittest.TestCase):
             if stripped.startswith("test_") or stripped in ("tests/", "tests"):
                 self.fail(f".gitignore 会吞掉测试文件：{stripped}")
 
+    def test_no_real_webhook_committed(self):
+        """真实飞书 webhook 一旦入库就等于把「往你群里发消息」的权限公开了。
+
+        仓库历史上真出过这件事（README 顶部至今留着处理说明）。当时唯一的防线是
+        「记得别写进去」——而 config/config.yaml 是**入库文件**，.gitignore 对它
+        根本不生效，于是一条本地调试用的真 webhook 很容易被顺手提交。
+
+        这里改成硬门禁：扫描仓库里所有会被提交的文本文件，出现形如真实 webhook /
+        GitHub token / AWS key 的串就让 CI 变红。占位符（xxxxx、<你的域名>）不算。
+        """
+        suspects = [
+            re.compile(r"open\.feishu\.cn/open-apis/bot/v2/hook/([A-Za-z0-9-]{12,})"),
+            re.compile(r"\bghp_[A-Za-z0-9]{30,}"),
+            re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"),
+            re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+        ]
+        text_ext = {".py", ".js", ".mjs", ".json", ".yaml", ".yml", ".md", ".txt",
+                    ".html", ".css", ".bat", ".sh", ".sql", ".template"}
+        hits = []
+        for dirpath, dirnames, filenames in os.walk(ROOT):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            for name in filenames:
+                if os.path.splitext(name)[1].lower() not in text_ext:
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        content = fh.read()
+                except OSError:
+                    continue
+                for pattern in suspects:
+                    for match in pattern.finditer(content):
+                        token = match.group(1) if match.groups() else match.group(0)
+                        # 全 x / 全是同一字符 = 文档里的占位符
+                        if len(set(token.lower())) <= 2:
+                            continue
+                        rel = os.path.relpath(path, ROOT).replace("\\", "/")
+                        hits.append(f"{rel}: {token[:8]}…")
+        self.assertEqual(hits, [], "检测到疑似真实密钥，请改用环境变量 / Secrets：" + "; ".join(hits))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -111,8 +111,17 @@ FEISHU_WEBHOOK=https://... python intraday_selection.py   # 实推一次
    可跑「收盘选股」并勾选 `skip_update`（跳过耗时的全量数据更新，用缓存数据库）。
 5. 手动测试通过后再等定时触发。GitHub 要求仓库 60 天内有活动，已内置每周心跳 workflow。
 
-> **未配置 `FEISHU_WEBHOOK` 时**：消息会正常生成但不推送，Actions 日志显示 `::warning::`，任务仍为绿色。
-> 配置后推送失败会直接让任务变红，并尝试发一条失败告警。
+> **未配置 `FEISHU_WEBHOOK` 时**的行为按脚本区分（此前文档写成「都只警告、任务仍为绿色」，与代码不符）：
+>
+> | 脚本 | 未配 webhook 时 | Actions 状态 |
+> |------|----------------|--------------|
+> | `intraday_selection.py` | 生成观察池，打印文本摘要，`::warning::` | 🟢 绿 |
+> | `main.py run`（收盘选股） | 生成结果，`::error::` 后退出 1 | 🔴 红 |
+> | `daily_news.py` / `evening_news.py` | **取数前**就退出，`::error::` | 🔴 红 |
+>
+> 后两者是刻意让任务变红：没配 webhook 属于配置错误，「绿了但群里没消息」是最难排查的状态。
+> 只想在本地看排版时用 `--dry-run`，不推送也不写台账。
+> 配置后推送失败同样会让任务变红，并尝试发一条失败告警。
 
 ## 配置说明
 
@@ -150,8 +159,8 @@ pip install -r requirements.txt
 python main.py init                      # 首次全量初始化
 python main.py run                       # 收盘选股并推送
 python intraday_selection.py --dry-run   # 盘中选股（不推送）
-python daily_news.py                     # 早间新闻
-python evening_news.py                   # 晚间新闻
+python daily_news.py --dry-run           # 早间新闻排版预览（不推送、不写台账）
+python evening_news.py --dry-run         # 晚间新闻排版预览
 python check_sources.py                  # 数据源健康自检（纯标准库）
 python check_sources.py --markdown       # 生成可贴进 CI Summary 的体检报告
 python run_scheduled.py --list           # 本地定时兜底（Actions 不可用时）
@@ -219,6 +228,11 @@ BIGA_SOURCE_EASTMONEY=0 python intraday_selection.py --dry-run   # 模拟东财�
 BIGA_SOURCE_EASTMONEY=0 BIGA_SOURCE_SINA=0 python check_sources.py  # 多级演练
 ```
 
+涨停池两项探针会**自动回看最近的交易日**：自检固定在周一 09:00（开盘前）跑，
+那时当天的涨停池必然是空的，周末更是必然为空，按「今天」判会把每周一次的自检
+变成固定假故障。现在取到的是 `37 只（回看 2026-11-13）` 这种写明日期的结果；
+只有今天这个请求本身报错、或最近 8 天全空，才算真故障照常报错。
+
 开关在 `config/multi_source.json`（注意：`config/data_sources.json` 是原仓库
 `data_fetcher.py` 的供应商优先级配置，两者互不干扰）；环境变量
 `BIGA_SOURCE_EASTMONEY / SINA / THS / TENCENT = 0` 可临时覆盖。
@@ -261,6 +275,13 @@ BIGA_SOURCE_EASTMONEY=0 BIGA_SOURCE_SINA=0 python check_sources.py  # 多级演�
 ## 安全边界
 
 这个项目没有账号体系，所以「谁能访问」就是唯一的安全边界。
+
+**密钥不得入库（有 CI 硬门禁）**
+
+`config/config.yaml` 是**入库文件**（全新 clone 要能直接跑），对它写 `.gitignore` 不生效。
+所以真正的防线不是「记得别写」，而是 `tests/test_smoke.py::test_no_real_webhook_committed`：
+它扫描仓库里所有会被提交的文本文件，发现形如真实飞书 webhook、`ghp_` / `github_pat_`
+GitHub token、`AKIA…` AWS key 的串就让 CI 变红。占位符（`xxxxx`、`<你的域名>`）不算。
 
 **Web 界面（`python main.py web`）**
 

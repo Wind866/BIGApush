@@ -101,9 +101,13 @@ def send_feishu(msg):
 def main():
     now = datetime.now(BJ_TZ)
     lines = []
+    # --dry-run：只生成消息并打印，不推送、不写台账。
+    # 没有它的话，本地想看一眼排版就必须先配一个真 webhook，否则脚本在取数前就退出了——
+    # README 里「未配置 webhook 也能验证内容」的描述与旧实现并不一致。
+    dry_run = "--dry-run" in sys.argv
 
     # 未配置 webhook 时直接跳过，避免日志出现「推送成功」造成误导
-    if not os.environ.get("FEISHU_WEBHOOK", "").strip():
+    if not os.environ.get("FEISHU_WEBHOOK", "").strip() and not dry_run:
         msg = "FEISHU_WEBHOOK 未配置，跳过本次推送（请在仓库 Secrets 中配置）"
         if os.environ.get("CI"):
             print(f"::error::{msg}")
@@ -114,7 +118,7 @@ def main():
     # 幂等守卫：Cloudflare Worker 准点触发 + GitHub cron 延迟触发会打两次，
     # 同一档期只让先到的那次真的推送（FORCE_PUSH=1 或 --force 可强制重推）
     force = "--force" in sys.argv or os.environ.get("FORCE_PUSH", "").strip() in ("1", "true", "yes")
-    if should_skip(WORKFLOW_FILE, force=force, slot_hour=EDITION_SLOT_HOUR):
+    if not dry_run and should_skip(WORKFLOW_FILE, force=force, slot_hour=EDITION_SLOT_HOUR):
         return
 
     # 标题
@@ -161,6 +165,11 @@ def main():
 
     # 发送
     msg = "\n".join(lines)
+    if dry_run:
+        print("---- 消息预览（--dry-run，未推送）----")
+        print(msg)
+        print("------------------------------------")
+        return
     if send_feishu(msg):
         print(f"✅ 晚间新闻推送成功 ({now.strftime('%H:%M:%S')} 北京时间)")
         # 只有飞书确实推送成功才记档期；非交易日/调试/失败的运行不会污染台账

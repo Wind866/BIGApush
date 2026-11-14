@@ -197,7 +197,8 @@ class KHunterSupportCalculator:
         stock_codes: List[str],
         hunting_date: str,
         tracking_days: int = 10,
-        key_dates: Optional[Dict[str, str]] = None
+        key_dates: Optional[Dict[str, str]] = None,
+        strategy_name: Optional[str] = None
     ) -> Dict[str, Dict[str, float]]:
         """
         批量计算多个股票的支撑位
@@ -207,6 +208,7 @@ class KHunterSupportCalculator:
             hunting_date: 狩猎日期，格式 YYYY-MM-DD
             tracking_days: 跟踪天数，默认10
             key_dates: 关键日期字典，格式 {stock_code: key_date}，可选
+            strategy_name: 策略名称，用于决定支撑位计算方法；不传则用默认 ma20
         
         返回：
             Dict: {
@@ -239,7 +241,13 @@ class KHunterSupportCalculator:
                     continue
                 
                 # 3. 获取支撑位计算方法
-                support_method = self._get_support_method(stock_code)
+                # 原来这里传的是 stock_code —— 那是个股票代码，不是策略名，
+                # 永远命中不了 STRATEGY_SUPPORT_METHODS，只会静默退到默认方法。
+                # 同时补上 _normalize_support_method：旧方法名（ma/low/percentage…）
+                # 不做归一化会直接 KeyError，把「不支持」变成一次崩溃。
+                support_method = self._normalize_support_method(
+                    self._get_support_method(strategy_name) if strategy_name else 'ma20'
+                )
                 
                 # 4. 调用对应的计算方法
                 df_kline = kline_dict[stock_code]
@@ -251,7 +259,11 @@ class KHunterSupportCalculator:
                 if support_method in ['resistance_break', 'key_open', 'key_close', 'key_close_5']:
                     # 这些方法需要关键日期
                     if not key_dates:
-                        raise ValueError(f"策略 {strategy_name} 需要关键日期，请提供key_dates参数")
+                        # 这里原先引用了一个不存在的 strategy_name，NameError 会顶掉
+                        # 本来要抛的 ValueError，调用方按 ValueError 捕获就接不住。
+                        raise ValueError(
+                            f"策略 {strategy_name or support_method} 需要关键日期，请提供key_dates参数"
+                        )
                     key_date = key_dates.get(stock_code)
                     if not key_date:
                         raise ValueError(f"股票 {stock_code} 缺少关键日期")
@@ -262,7 +274,9 @@ class KHunterSupportCalculator:
                 # 6. 保存结果
                 results[stock_code] = {
                     'support_level': support_level,
-                    'strategy_name': stock_code,
+                    # 这里原本填的是 stock_code，等于把「股票代码」写进了 strategy_name 字段，
+                    # 落库后策略维度统计全是代码，按策略聚合永远为空。
+                    'strategy_name': strategy_name or '',
                     'method': support_method
                 }
             

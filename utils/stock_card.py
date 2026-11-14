@@ -47,6 +47,11 @@ MAS = (
 )
 KLINE_BARS = 120  # 画多少根 K 线；MA60 需要至少 60 根，90 根时开头会缺一大截
 
+# 筹码分布用的浅色（比涨跌色淡，避免和 K 线抢眼）：成本在现价下方=浮盈，上方=套牢
+CHIP_PROFIT = "#eaa1a1"
+CHIP_TRAPPED = "#8ec4a8"
+CHIP_AVG = "#8a5cf5"
+
 FONT_FILES = (
     # Linux runner（workflow 里 apt-get install fonts-noto-cjk 后就有）
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -230,7 +235,7 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
 
     hist 为空时只画一条窄提示条（不占整块图高，否则卡片中间会空一大片）。
     """
-    if vol_rect is None:
+    if not vol_rect:
         ax = fig.add_axes(rect)
         ax.set_axis_off()
         ax.add_patch(Rectangle((0, 0.1), 1, 0.8, transform=ax.transAxes,
@@ -238,7 +243,7 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
         ax.text(0.5, 0.5, "行情历史数据暂不可用（数据源超时），下方仍为实时指标",
                 transform=ax.transAxes, ha="center", va="center",
                 fontsize=11, color=SUB, family=_font_name)
-        return
+        return None
 
     price_ax = fig.add_axes(rect)
     vol_ax = fig.add_axes(vol_rect, sharex=price_ax)
@@ -249,7 +254,7 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
                       ha="center", va="center", fontsize=13, color=SUB,
                       family=_font_name)
         vol_ax.set_axis_off()
-        return
+        return None
 
     # 120 根才够 MA60 画出像样的曲线（tail(90) 时 MA60 只有 31 个点，开头一节是空的）
     df = hist.tail(KLINE_BARS).reset_index(drop=True)
@@ -344,6 +349,45 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
         vol_ax.spines[side].set_visible(False)
     vol_ax.spines["bottom"].set_color(LINE)
     vol_ax.tick_params(axis="y", labelsize=7.5, colors=SUB, length=0)
+    return price_ax
+
+
+def _draw_chips(fig, chips, rect, price_ax):
+    """K 线右侧的筹码分布：横条按价格排，长度=该价位的筹码占比。
+
+    和价格轴共享 y 轴，所以一根横条正对着同价位的 K 线 —— 一眼能看出套牢盘
+    压在哪、现价上下各有多少筹码。成本低于现价（浮盈）画红，高于现价（套牢）
+    画绿，与 A 股涨跌配色一致。
+    """
+    centers = list((chips or {}).get("centers") or [])
+    weights = list((chips or {}).get("weights") or [])
+    if not centers or not weights or price_ax is None:
+        return
+
+    ax = fig.add_axes(rect, sharey=price_ax)
+    now = chips.get("price") or centers[-1]
+    step = (centers[1] - centers[0]) if len(centers) > 1 else 0.01
+    colors = [CHIP_PROFIT if p <= now else CHIP_TRAPPED for p in centers]
+    ax.barh(centers, weights, height=step * 0.86, color=colors, linewidth=0)
+
+    avg = chips.get("avg_cost")
+    if avg:
+        ax.axhline(avg, color=CHIP_AVG, linewidth=1.1, linestyle=(0, (4, 2)))
+    ax.set_xlim(0, 1.06)
+    ax.set_ylim(price_ax.get_ylim())
+    ax.set_axisbelow(True)
+    # loc="right"：均线图例已经占满左侧那一行的右端，标题靠右才不粘连
+    ax.set_title("筹码", loc="right", fontsize=8, color=SUB,
+                 family=_font_name, pad=6)
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
+    for side in ("top", "right", "left", "bottom"):
+        ax.spines[side].set_visible(False)
+    # 平均成本标在虚线右端，压白底方块避免和筹码条糊在一起
+    if avg:
+        ax.text(0.99, avg, f"{avg:.2f}", fontsize=6.5, color=CHIP_AVG,
+                family=_font_name, ha="right", va="bottom",
+                bbox={"boxstyle": "round,pad=0.15", "facecolor": "white",
+                      "edgecolor": "none", "alpha": 0.85})
 
 
 def _draw_metrics(fig, items, rect):
@@ -463,6 +507,7 @@ def render_stock_card(
     advice: Optional[dict] = None,
     signals: Optional[list] = None,
     hist=None,
+    chips: Optional[dict] = None,
     generated_at: str = "",
     sources: str = "腾讯行情 / 同花顺资金流 / 百度估值 / 新浪财报",
 ) -> bool:
@@ -470,6 +515,8 @@ def render_stock_card(
 
     Args:
         hist: 历史行情 DataFrame（列：date/open/high/low/close/volume），可给 None。
+        chips: ``utils.chip_analysis.compute_chip_distribution`` 的返回值；
+            没有（或缺流通股本导致 available=False）就不画筹码，卡片其余部分照旧。
 
     Returns:
         True 渲染成功；False 表示环境缺中文字体或绘制失败，调用方应退回纯文本。
@@ -485,6 +532,7 @@ def render_stock_card(
     growth = growth or {}
     advice = advice or {}
     signals = signals or []
+    chips = chips if isinstance(chips, dict) and chips.get("available") else {}
     indicators = technical.get("indicators") or {}
 
     def _with_level(number, level, unit=""):
@@ -512,13 +560,39 @@ def render_stock_card(
         ("RSI", fmt_num(indicators.get("RSI")), None),
     ]
 
+    # 筹码四项排在最后一行：回答「成本价多少 / 有多少人浮盈 / 套牢盘压在哪」
+    if chips:
+        avg, dev = chips.get("avg_cost"), chips.get("deviation")
+        profit = chips.get("profit_ratio")
+        conc = chips.get("concentration")
+        items += [
+            # 「低 5.4%」比「-5.4%」好读：一眼知道是现价低于成本还是高于成本
+            ("平均成本",
+             f"{avg:.2f}（{'低' if dev < 0 else '高'} {abs(dev):.1%}）"
+             if avg and not _is_dash(dev) else fmt_num(avg, 2),
+             _color_for(dev) if not _is_dash(dev) else None),
+            ("获利比例", _with_level(f"{profit:.0%}" if not _is_dash(profit) else "—",
+                                  chips.get("profit_level")), None),
+            ("90%成本区间",
+             f"{chips['cost_low']:.2f}~{chips['cost_high']:.2f}"
+             if chips.get("cost_low") and chips.get("cost_high") else "—", None),
+            ("筹码集中度", _with_level(f"{conc:.1%}" if not _is_dash(conc) else "—",
+                                   chips.get("concentration_level")), None),
+        ]
+
     risks = [r for r in (advice.get("risks") or [])
              if r and "不构成" not in r and "未考虑突发" not in r][:2]
 
     # 有 K 线就按「图 + 窄指标 + 结论」排；没有就把图压成一条提示，
     # 把高度让给指标和结论，避免卡片中间空一大块
     has_chart = hist is not None and len(hist) >= 5
-    if has_chart:
+    chip_rect = None
+    if has_chart and chips:
+        # 右侧 11.5% 图宽留给筹码分布；指标多了一行，纵向也要重排
+        kline_rect, vol_rect = [0.055, 0.625, 0.775, 0.230], [0.055, 0.535, 0.775, 0.070]
+        chip_rect = [0.833, 0.625, 0.117, 0.230]
+        metrics_rect, advice_rect = [0.05, 0.240, 0.90, 0.285], [0.05, 0.042, 0.90, 0.180]
+    elif has_chart:
         # 价格轴底边与成交量轴顶边留 2.3% 图高的间隙：贴在一起时价格轴最下面那个
         # 刻度会和「成交量（亿股）」标题撞在一行里
         kline_rect, vol_rect = [0.055, 0.600, 0.90, 0.245], [0.055, 0.505, 0.90, 0.072]
@@ -531,7 +605,9 @@ def render_stock_card(
         fig = plt.figure(figsize=(9, 12.6), dpi=120, facecolor=BG)
         _draw_header(fig, name=name, code=code, market=market, industry=industry,
                      price=price, pct=pct, cap=cap)
-        _draw_kline(fig, hist, name, kline_rect, vol_rect)
+        price_ax = _draw_kline(fig, hist, name, kline_rect, vol_rect)
+        if chip_rect and price_ax is not None:
+            _draw_chips(fig, chips, chip_rect, price_ax)
         _draw_metrics(fig, items, metrics_rect)
         _draw_advice(fig, advice, signals, risks, advice_rect)
         _draw_footer(fig, sources, generated_at)

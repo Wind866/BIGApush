@@ -77,10 +77,13 @@ def _clip(text: str, limit: int = 130) -> str:
 # ---------------------------------------------------------------- 实时行情
 
 def fetch_quotes(codes: list) -> dict:
-    """腾讯批量取现价/涨跌幅/总市值（一次请求搞定所有代码，避免逐个查被限流）。
+    """腾讯批量取现价/涨跌幅/市值/换手（一次请求搞定所有代码，避免逐个查被限流）。
+
+    字段位置（`~` 分割，腾讯行情协议）：3=现价 32=涨跌幅 38=换手率
+    44=**流通**市值(亿) 45=**总**市值(亿)。
 
     Returns:
-        {code: {"price": float|None, "pct": float|None, "cap": 元|None}}
+        {code: {"price", "pct", "cap"(总市值,元), "float_mv"(流通市值,元), "turnover"(%)}}
     """
     if not codes:
         return {}
@@ -116,11 +119,17 @@ def fetch_quotes(codes: list) -> dict:
                 raw = parts[idx].strip() if idx < len(parts) else ""
                 return float(raw) if raw else None
 
-            price, pct, cap_yi = _f(3), _f(32), _f(44)
+            price, pct = _f(3), _f(32)
+            turnover = _f(38)
+            # 44 是流通市值、45 才是总市值：早先只读了 44 却当总市值显示，
+            # 全流通股看不出差别，限售比例高的股会明显偏小
+            fmv_yi, tmv_yi = _f(44), _f(45)
             out[code] = {
                 "price": price if price and price > 0 else None,
                 "pct": (pct / 100.0) if pct is not None else None,
-                "cap": (cap_yi * 1e8) if cap_yi and cap_yi > 0 else None,
+                "cap": ((tmv_yi or fmv_yi) * 1e8) if (tmv_yi or fmv_yi) else None,
+                "float_mv": (fmv_yi * 1e8) if fmv_yi else None,
+                "turnover": turnover if turnover is not None else None,
             }
         except Exception:  # noqa: BLE001  单行解析失败不影响其它股票
             continue
@@ -136,7 +145,8 @@ def _color_icon(pct):
     return "🔴" if pct >= 0 else "🟢"
 
 
-def format_stock(index: int, code: str, result: dict, quote: dict) -> str:
+def format_stock(index: int, code: str, result: dict, quote: dict,
+                 chips: dict | None = None) -> str:
     """把单只股票的分析结果排成若干行纯文本。"""
     if not result:
         return f"{index}. {code}  ❌ 分析失败（数据源全部不可用或代码不存在）"
@@ -186,6 +196,20 @@ def format_stock(index: int, code: str, result: dict, quote: dict) -> str:
         lines.append(
             f"   💰 资金：主力净流入 {fmt_yi(flow.get('main_inflow'))}"
             f"（{flow.get('direction', '—')}·{flow.get('strength', '—')}）"
+        )
+
+    if chips and chips.get("available"):
+        avg = chips.get("avg_cost")
+        dev = chips.get("deviation")
+        lines.append(
+            f"   🎯 筹码：平均成本 {fmt_num(avg, 2)}"
+            f"（现价{'低' if (dev or 0) < 0 else '高'} {abs(dev or 0) * 100:.1f}%）｜ "
+            f"获利 {fmt_num((chips.get('profit_ratio') or 0) * 100, 0, '%')}"
+            f"（{chips.get('profit_level', '—')}）｜ "
+            f"90% 成本 {fmt_num(chips.get('cost_low'), 2)}~{fmt_num(chips.get('cost_high'), 2)} ｜ "
+            f"集中度 {fmt_num((chips.get('concentration') or 0) * 100, 1, '%')}"
+            f"（{chips.get('concentration_level', '—')}）｜ "
+            f"筹码峰 {fmt_num(chips.get('peak_price'), 2)}"
         )
 
     val = fund.get("valuation") or {}
@@ -441,7 +465,8 @@ def write_summary(msg: str) -> None:
 
 # ---------------------------------------------------------------- 主流程
 
-def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: str) -> dict:
+def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: str,
+                    chips: dict | None = None) -> dict:
     """把分析结果摊平成 render_stock_card 的关键字参数（字段缺失一律给空值，别让渲染崩）。"""
     if not analysis:
         return {}
@@ -466,6 +491,7 @@ def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: 
         "advice": analysis.get("buy_advice") or {},
         "signals": analysis.get("signals") or [],
         "hist": hist,
+        "chips": chips or {},
         "generated_at": generated_at,
     }
 
@@ -508,6 +534,7 @@ def main() -> int:
     from stock_analyzer.real_fundamentals import (
         enrich_fundamental, get_real_financials, get_real_valuation,
     )
+    from utils.chip_analysis import compute_chip_distribution, float_shares_from_mv
 
     quotes = fetch_quotes(codes)
     analyzer = StockAnalyzer()
@@ -552,9 +579,32 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             print(f"::warning::{code} 取 K 线数据失败，图片不带走势图：{type(exc).__name__} {exc}")
 
+        # 筹码分布：需要「流通股本」才成立（换手率 = 成交量 / 流通股本），
+        # 拿不到就整块跳过，绝不猜一个股本糊个数出来
+        chips = {}
+        if hist is not None and len(hist):
+            try:
+                last_close = float(hist["close"].iloc[-1])
+                shares = float_shares_from_mv(
+                    quote.get("float_mv"), quote.get("price") or last_close
+                )
+                chips = compute_chip_distribution(
+                    hist, shares, price=quote.get("price") or last_close
+                )
+                if chips.get("available"):
+                    print(f"[CHIP] {code} 平均成本 {chips['avg_cost']:.2f} "
+                          f"获利 {chips['profit_ratio']:.0%} "
+                          f"集中度 {chips['concentration']:.1%}")
+                else:
+                    print(f"::warning::{code} 筹码分布跳过：{chips.get('reason')}")
+            except Exception as exc:  # noqa: BLE001  筹码算不出来不影响主结论
+                print(f"::warning::{code} 筹码计算出错：{type(exc).__name__} {exc}")
+                chips = {}
+
         block_index = len(blocks)
-        blocks.append(format_stock(idx, code, analysis, quote))
-        spec = build_card_spec(code, analysis, quote, hist, now.strftime("%Y-%m-%d %H:%M"))
+        blocks.append(format_stock(idx, code, analysis, quote, chips))
+        spec = build_card_spec(code, analysis, quote, hist, now.strftime("%Y-%m-%d %H:%M"),
+                               chips)
         if spec:
             pairs.append((block_index, spec))
         ok += 1

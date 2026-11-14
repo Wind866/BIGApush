@@ -52,6 +52,14 @@ class StockCardMaTest(unittest.TestCase):
         # 图例写成「MA20 4.11」比只写「MA20」有用：当前均线值一眼可见
         self.assertIn('label=f"MA{window} {last:.2f}"', src)
 
+    def test_chip_panel_is_wired(self):
+        with open(CARD, encoding="utf-8") as fh:
+            src = fh.read()
+        # 筹码是「有没有」都可能的分支：接口接了但漏渲染，卡片会静默少一块
+        self.assertIn("chips: Optional[dict] = None", src, "render_stock_card 要有 chips 参数")
+        self.assertIn("_draw_chips(fig, chips, chip_rect, price_ax)", src, "筹码面板要真的被调用")
+        self.assertIn("sharey=price_ax", src, "筹码分布必须和价格轴共享 y，否则价位对不齐")
+
 
 if __name__ == "__main__":
     unittest.main()

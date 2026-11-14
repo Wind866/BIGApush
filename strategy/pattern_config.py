@@ -21,7 +21,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 def _config_candidates():
     """按优先级返回配置文件候选路径：环境变量 → 仓库内。
 
-    不再保留任何绝对路径兜底（例如旧部署机的 /root/...）：云端 runner 上
+    不再保留任何绝对路径兜底（例如旧部署机的本机路径）：云端 runner 上
     访问这类路径会抛 PermissionError，正是它把整个策略注册表拖垮的。
     需要自定义位置时设置环境变量 STRATEGY_PARAMS_PATH。
     """

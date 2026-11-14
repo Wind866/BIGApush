@@ -63,25 +63,35 @@ jobs:
       - name: 云端等价冒烟（受限路径下必须能导入）
         run: |
           python - <<'PY'
-          import importlib
+          import importlib.util
           import os
-          import sys
+          import pathlib
 
-          # 1) 默认导入：仓库内有 config/strategy_params.yaml，必须能读到而不是崩
-          from strategy.pattern_config import B1_PERFECT_CASES
-          import strategy.pattern_config as pc
-          assert isinstance(pc._yaml_config, dict), '_yaml_config 必须是 dict'
-          assert B1_PERFECT_CASES, 'B1 案例配置不能为空'
+          # 直接用文件路径加载，绕过 strategy/__init__.py（那里会拉 pandas/scipy 全套），
+          # 只验证 pattern_config 自身的「受限路径下能否导入」这一件事。
+          def load(env_path):
+              if env_path is None:
+                  os.environ.pop('STRATEGY_PARAMS_PATH', None)
+              else:
+                  os.environ['STRATEGY_PARAMS_PATH'] = env_path
+              spec = importlib.util.spec_from_file_location('pc_under_test', 'strategy/pattern_config.py')
+              mod = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(mod)
+              return mod
+
+          # 1) 正常导入：仓库内有 config/strategy_params.yaml，必须能读到而不是崩
+          mod = load(None)
+          assert isinstance(mod._yaml_config, dict), '_yaml_config 必须是 dict'
+          assert len(mod.B1_PERFECT_CASES) >= 1, 'B1 案例配置不能为空'
+          print('OK pattern_config：正常导入，案例数', len(mod.B1_PERFECT_CASES))
 
           # 2) 指向不可访问路径（模拟云端 /root）：必须静默降级，不能抛异常
-          os.environ['STRATEGY_PARAMS_PATH'] = '/root/quant-csv/config/strategy_params.yaml'
-          pc = importlib.reload(pc)
-          assert isinstance(pc._yaml_config, dict), '受限路径下应降级为空配置'
-          print('OK pattern_config：受限路径下导入正常，案例数', len(pc.B1_PERFECT_CASES))
+          mod = load('/root/quant-csv/config/strategy_params.yaml')
+          assert isinstance(mod._yaml_config, dict), '受限路径下应降级为空配置'
+          print('OK pattern_config：受限路径下降级为空配置，未抛 PermissionError')
 
           # 3) 缓存路径不得落在仓库外（写不进去会拖垮案例库初始化）
-          from pathlib import Path
-          cache = Path('strategy/pattern_library.py').read_text(encoding='utf-8')
+          cache = pathlib.Path('strategy/pattern_library.py').read_text(encoding='utf-8')
           assert '/root/' not in cache, 'pattern_library 仍含硬编码 /root/ 路径'
           print('OK pattern_library：缓存路径已仓库内相对化')
           PY

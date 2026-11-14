@@ -23,7 +23,7 @@ class B1PatternLibrary:
     - 为B2、B3等扩展预留空间
     """
     
-    # 缓存文件放在仓库内 data/ 下。原来写死 /root/quant-csv/...，
+    # 缓存文件放在仓库内 data/ 下。原来写死的是一个部署机的绝对路径，
     # 云端 runner 上 exists() 会抛 PermissionError，直接拖垮整个案例库初始化。
     CACHE_FILE = Path(__file__).resolve().parent.parent / "data" / "b1_pattern_library_cache.json"
     

@@ -36,3 +36,6 @@ Thumbs.db
 # 环境配置
 .env
 config/config.yaml
+
+# 个股卡片图片（每次运行重新生成，只走 artifact）
+reports/cards/

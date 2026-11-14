@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""个股深度分析 → 飞书推送。
+"""个股深度分析 → 飞书推送（图片卡片优先，失败退回文本）。
 
 在 GitHub Actions 手动触发（填股票代码），在 runner 上跑真实数据取数
-（行情 / 资金流 / 估值 / 财务），合成「策略信号 + 买入建议」，以纯文本消息推到飞书群。
+（行情 / 资金流 / 估值 / 财务），合成「策略信号 + 买入建议」，
+默认渲染成**一张图**推到飞书群（长文本在手机上要滑很多屏）。
 
 与 verify-valuation.yml 的分工：
   - verify-valuation.yml：给开发看的数据源自检，只打日志、不推送；
@@ -12,6 +13,12 @@
 用法：
     python stock_query.py 600519 000001
     STOCK_CODES=600519,000001 PERIOD=90d python stock_query.py
+
+环境变量：
+    FEISHU_APP_ID / FEISHU_APP_SECRET   自建应用凭证（发图片必需）
+    FEISHU_CHAT_ID                     Worker 传下来的会话 id（哪问哪答）
+    FEISHU_WEBHOOK                     群自定义机器人 webhook（纯文本兜底）
+    CARD_DIR                           图片输出目录，默认 reports/cards
 """
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 BJ_TZ = timezone(timedelta(hours=8))
+FEISHU_API = "https://open.feishu.cn/open-apis"
 
 # 单次最多查 6 只：再多会拉长运行时间并容易触发数据源限流
 MAX_CODES = 6
@@ -302,6 +310,123 @@ def push(msg: str) -> bool:
     return send_feishu(msg)
 
 
+# ---------------------------------------------------------------- 图片推送
+
+def upload_image(token: str, path) -> str:
+    """上传 PNG 到飞书，拿 image_key（图片消息必需，webhook 发不了本地文件）。"""
+    name = Path(path).name
+    with open(path, "rb") as fp:
+        resp = requests.post(
+            f"{FEISHU_API}/im/v1/images",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"image_type": "message"},
+            files={"image": (name, fp, "image/png")},
+            timeout=60,
+        )
+    payload = resp.json()
+    if payload.get("code") != 0:
+        code = payload.get("code")
+        print(f"❌ 上传图片失败：{code} {payload.get('msg')}")
+        if code in (99991672, 99991663):
+            print("::warning::飞书应用缺少「获取与上传图片或文件资源 im:resource」权限，"
+                  "开放平台 → 权限管理开通后需重新发布版本；本次退回文本推送")
+        return ""
+    key = (payload.get("data") or {}).get("image_key") or ""
+    if not key:
+        print(f"❌ 上传图片未返回 image_key：{payload}")
+    return key
+
+
+def send_image(token: str, image_key: str, chat_id: str) -> bool:
+    try:
+        resp = requests.post(
+            f"{FEISHU_API}/im/v1/messages",
+            params={"receive_id_type": "chat_id"},
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "receive_id": chat_id,
+                "msg_type": "image",
+                "content": json.dumps({"image_key": image_key}),
+            },
+            timeout=20,
+        )
+        payload = resp.json()
+        if payload.get("code") != 0:
+            print(f"❌ 发送图片失败：{payload.get('code')} {payload.get('msg')}")
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ 发送图片异常：{type(exc).__name__} {exc}")
+        return False
+
+
+def card_dir() -> Path:
+    raw = (os.environ.get("CARD_DIR") or "").strip()
+    out = Path(raw) if raw else ROOT / "reports" / "cards"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def push_cards(pairs: list, blocks: list, msg: str) -> bool:
+    """逐只渲染图片并发到会话；任何一环不通就退回文本，绝不发半残内容。
+
+    Args:
+        pairs:  [(文本块下标, render_stock_card 的关键字参数)]
+        blocks: 纯文本块列表（图片发失败时按同一只股票补发）
+        msg:    全部股票的完整文本（整体兜底）
+    """
+    chat_id = os.environ.get("FEISHU_CHAT_ID", "").strip()
+    try:
+        token = _feishu_token()
+    except Exception as exc:  # noqa: BLE001
+        print(f"::warning::取 tenant_access_token 失败，改用文本：{exc}")
+        token = None
+    if not token or not chat_id:
+        print("[CARD] 没有应用凭证或会话 id，跳过图片，直接发文本")
+        return push(msg)
+
+    # 延迟导入：没装 matplotlib 的环境（例如只跑取数）不该因此崩掉
+    try:
+        from utils.stock_card import render_stock_card
+    except Exception as exc:  # noqa: BLE001
+        print(f"::warning::图片模块不可用（{type(exc).__name__} {exc}），改用文本")
+        return push(msg)
+
+    outdir = card_dir()
+    failed = []
+    sent = 0
+    for idx, spec in pairs:
+        png = outdir / f"{spec['code']}_card.png"
+        try:
+            if not render_stock_card(png, **spec):
+                failed.append(idx)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            print(f"::warning::{spec['code']} 渲染异常：{type(exc).__name__} {exc}")
+            failed.append(idx)
+            continue
+        key = upload_image(token, png)
+        if not key or not send_image(token, key, chat_id):
+            failed.append(idx)
+            continue
+        sent += 1
+        print(f"[CARD] {spec['code']} 已发送图片 {png}")
+
+    if not sent:
+        print("[CARD] 一张都没发出去，整段文本兜底")
+        return push(msg)
+
+    if failed:
+        # 只补发没发出去的那几只，避免和已发出的图片重复刷屏
+        tail = "\n\n".join(blocks[i] for i in sorted(set(failed)) if i < len(blocks))
+        if tail.strip():
+            print(f"[CARD] {len(set(failed))} 只图片失败，补发文本")
+            send_to_chat("（以下因图片生成失败改用文字）\n\n" + tail, chat_id)
+    print(f"[PUSH] 已发送 {sent}/{len(pairs)} 张图片到会话 {chat_id}")
+    return True
+
+
+
 def write_summary(msg: str) -> None:
     """同时写一份到 GitHub Actions 运行页的 Summary，方便不开飞书也能看。"""
     path = os.environ.get("GITHUB_STEP_SUMMARY", "").strip()
@@ -315,6 +440,35 @@ def write_summary(msg: str) -> None:
 
 
 # ---------------------------------------------------------------- 主流程
+
+def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: str) -> dict:
+    """把分析结果摊平成 render_stock_card 的关键字参数（字段缺失一律给空值，别让渲染崩）。"""
+    if not analysis:
+        return {}
+    info = analysis.get("stock_info") or {}
+    fundamental = analysis.get("fundamental") or {}
+    industry = info.get("industry") or ""
+    if industry in ("未知行业", "未知"):
+        industry = "行业未知"
+    return {
+        "code": code,
+        "name": info.get("name") or code,
+        "market": info.get("market") or "",
+        "industry": industry,
+        "price": quote.get("price"),
+        "pct": quote.get("pct"),
+        "cap": quote.get("cap"),
+        "technical": analysis.get("technical") or {},
+        "flow": (analysis.get("fund_flow") or {}).get("flow_analysis") or {},
+        "valuation": fundamental.get("valuation") or {},
+        "financial": fundamental.get("financial") or {},
+        "growth": fundamental.get("growth") or {},
+        "advice": analysis.get("buy_advice") or {},
+        "signals": analysis.get("signals") or [],
+        "hist": hist,
+        "generated_at": generated_at,
+    }
+
 
 def parse_codes(argv: list) -> list:
     raw = " ".join(argv) if argv else (os.environ.get("STOCK_CODES") or "")
@@ -357,8 +511,9 @@ def main() -> int:
 
     quotes = fetch_quotes(codes)
     analyzer = StockAnalyzer()
+    now = datetime.now(BJ_TZ)
 
-    blocks, ok = [], 0
+    blocks, pairs, ok = [], [], 0
     for idx, code in enumerate(codes, 1):
         try:
             analysis = analyzer.analyze(code, period=period)
@@ -390,13 +545,23 @@ def main() -> int:
         if not quote.get("cap"):
             quote["cap"] = ((analysis.get("fundamental") or {}).get("valuation") or {}).get("market_cap")
 
+        # 画 K 线要历史行情；拿不到就只画指标（卡片照样能出，不至于整只退文本）
+        hist = None
+        try:
+            hist = analyzer.data_fetcher.get_stock_quote(code, period="200d")
+        except Exception as exc:  # noqa: BLE001
+            print(f"::warning::{code} 取 K 线数据失败，图片不带走势图：{type(exc).__name__} {exc}")
+
+        block_index = len(blocks)
         blocks.append(format_stock(idx, code, analysis, quote))
+        spec = build_card_spec(code, analysis, quote, hist, now.strftime("%Y-%m-%d %H:%M"))
+        if spec:
+            pairs.append((block_index, spec))
         ok += 1
         print(f"[OK] {code} {analysis['stock_info'].get('name')} "
               f"建议={analysis['buy_advice'].get('action')} "
               f"score={analysis['buy_advice'].get('score')}")
 
-    now = datetime.now(BJ_TZ)
     header = [
         f"📊 个股深度分析 · {now.strftime('%Y-%m-%d %H:%M')}",
         "",
@@ -414,7 +579,7 @@ def main() -> int:
     print("------------------")
 
     write_summary(msg)
-    sent = push(msg)
+    sent = push_cards(pairs, blocks, msg)
     print(f"[DONE] {ok}/{len(codes)} 只有结果，推送={'成功' if sent else '未发送'}")
 
     # 一只都没成功，或者明明配了推送通道却发不出去 —— 都要让 Actions 红，避免假绿

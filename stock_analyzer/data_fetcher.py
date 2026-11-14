@@ -40,6 +40,30 @@ def _parse_cn_money(value: Any) -> Optional[float]:
         return None
 
 
+# 同花顺「即时」资金流是全市场快照，单次调用开销较大且短时间重复调用易被限流，
+# 因此进程内做 60s 缓存：一个请求只取一次快照，多股复用。
+_THS_FF_CACHE: Dict[str, Any] = {"ts": 0.0, "df": None}
+_THS_FF_TTL = 60.0
+
+
+def _get_ths_ff_snapshot():
+    """获取同花顺全市场即时资金流快照（带 60s 进程内缓存；失败不缓存）。"""
+    now = time.time()
+    cached = _THS_FF_CACHE.get("df")
+    if cached is not None and (now - _THS_FF_CACHE.get("ts", 0.0)) < _THS_FF_TTL:
+        return cached
+    try:
+        import akshare as ak
+        df = akshare_call_with_retry(ak.stock_fund_flow_individual, symbol="即时")
+        if df is not None and not df.empty:
+            _THS_FF_CACHE["df"] = df
+            _THS_FF_CACHE["ts"] = now
+        return df
+    except Exception as e:  # noqa: BLE001
+        print(f"同花顺资金流快照获取失败: {e}")
+        return None
+
+
 class DataFetcher:
     """数据获取器"""
     
@@ -301,36 +325,36 @@ class DataFetcher:
             dict: 资金流向数据
         """
         try:
-            # 1) 主源：东财个股资金流（数据中心 IP 常被拦截）
+            # 1) 主源：东财个股资金流（数据中心 IP 常被拦截/返回残缺，仅有有效「主力净流入」才采信）
             fund_flow = None
             try:
                 fund_flow = akshare_call_with_retry(
                     ak.stock_individual_fund_flow, stock=stock_code
                 )
-                if fund_flow is not None and not fund_flow.empty:
-                    # 获取主力净流入
-                    main_inflow = 0
-                    if "主力净流入" in fund_flow.columns:
-                        main_inflow = fund_flow.get("主力净流入", 0).iloc[0] if not fund_flow.get("主力净流入").empty else 0
-
-                    # 获取成交量变化
-                    volume_change = "稳定"
-                    if "成交量" in fund_flow.columns and len(fund_flow) >= 2:
-                        current_volume = fund_flow.get("成交量", 0).iloc[0] if not fund_flow.get("成交量").empty else 0
-                        prev_volume = fund_flow.get("成交量", 0).iloc[1] if not fund_flow.get("成交量").empty else 0
-                        volume_change = "增加" if current_volume > prev_volume else "减少"
-
-                    return {
-                        "main_inflow": float(main_inflow) if main_inflow is not None else 0,
-                        "north_inflow": 0,  # akshare暂时没有北向资金数据
-                        "volume_change": volume_change
-                    }
             except Exception as em_err:  # noqa: BLE001
                 print(f"东财资金流获取失败，尝试同花顺兜底: {em_err}")
 
+            if (fund_flow is not None and not fund_flow.empty
+                    and "主力净流入" in fund_flow.columns):
+                try:
+                    main_inflow = float(fund_flow["主力净流入"].iloc[0])
+                except Exception:
+                    main_inflow = None
+                if main_inflow is not None:
+                    volume_change = "稳定"
+                    if "成交量" in fund_flow.columns and len(fund_flow) >= 2:
+                        cur = fund_flow["成交量"].iloc[0]
+                        prev = fund_flow["成交量"].iloc[1]
+                        volume_change = "增加" if cur > prev else "减少"
+                    return {
+                        "main_inflow": main_inflow,
+                        "north_inflow": 0,  # akshare暂时没有北向资金数据
+                        "volume_change": volume_change
+                    }
+
             # 2) 兜底：同花顺即时资金流（数据中心友好；全市场快照按代码取「净额」）
             try:
-                ths = akshare_call_with_retry(ak.stock_fund_flow_individual, symbol="即时")
+                ths = _get_ths_ff_snapshot()
                 if ths is not None and not ths.empty and "股票代码" in ths.columns:
                     codes = ths["股票代码"].astype(str).str.zfill(6)
                     row = ths[codes == str(stock_code).zfill(6)]
@@ -343,6 +367,11 @@ class DataFetcher:
                                 "north_inflow": 0,
                                 "volume_change": "稳定"
                             }
+                        print(f"同花顺资金流 {stock_code}: 净额解析为空 ({row.iloc[0].get('净额')!r})")
+                    else:
+                        print(f"同花顺快照未含 {stock_code}（快照 {len(ths)} 只）")
+                else:
+                    print("同花顺资金流快照为空或结构异常")
             except Exception as ths_err:  # noqa: BLE001
                 print(f"同花顺资金流兜底也失败: {ths_err}")
 

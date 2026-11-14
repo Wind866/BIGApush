@@ -276,18 +276,19 @@ https://<域名>/feishu/poll
 | `扫描群数：0` | 机器人不在任何群里，先拉进群 |
 | **`230035 Send Message Permission deny`** | **群没给机器人发言权限**：群设置 → 群管理 →「谁可以发消息」改成「所有群成员」，或把机器人设为群管理员。注意这是**群**的设置，不是开放平台权限，跟 `im:message:send_as_bot` 无关（单聊能发、群里发不出就是它） |
 | `派发失败：HTTP 401 / 403` | `GH_TOKEN` 过期或缺 `workflow` 权限，去 `/health?check=1` 看 `tokenValid` |
+| `派发失败：HTTP 404` | 派发 URL 拼错（漏 `/actions/workflows/`）或 workflow 文件名不对。`/feishu/selftest` 里有一行 `个股查询 workflow：OK/失败` 专查这个 |
 
 还有一个通道自检端点，逐项验完再决定要不要真发一条：
 
 ```bash
-curl https://<域名>/feishu/selftest          # 飞书 token / 机器人 / 目标群 / GH token
+curl https://<域名>/feishu/selftest          # 飞书 token / 机器人 / 目标群 / GH token / workflow 可达性
 curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里发一条自检消息
 ```
 
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-14.7 或更新，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-14.9 或更新，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 

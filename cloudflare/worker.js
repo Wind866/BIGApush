@@ -57,7 +57,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.8";
+const BUILD = "2026-11-14.9";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -426,24 +426,31 @@ async function feishuSend(env, chatId, text) {
 async function dispatchQuery(env, codes, chatId) {
   const owner = (env.OWNER || "Wind866").trim();
   const branch = (env.BRANCH || "main").trim();
+  // QUERY_TARGET 是「仓库/工作流文件」，必须拆开拼：少写 /actions/workflows/ 会 404
+  const [repo, workflow] = QUERY_TARGET.split("/");
   try {
     const headers = await authHeaders(env);
-    const res = await fetch(`${API}/repos/${owner}/${QUERY_TARGET}/dispatches`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      // 带上 chat_id：workflow 跑完把结论发回提问的那个会话（群里问就回群里），
-      // 而不是只发到 FEISHU_WEBHOOK 绑定的那个群
-      body: JSON.stringify({
-        ref: branch,
-        inputs: { stocks: codes.join(","), period: "90d", chat_id: chatId || "" },
-      }),
-    });
+    const res = await fetch(
+      `${API}/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`,
+      {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        // 带上 chat_id：workflow 跑完把结论发回提问的那个会话（群里问就回群里），
+        // 而不是只发到 FEISHU_WEBHOOK 绑定的那个群
+        body: JSON.stringify({
+          ref: branch,
+          inputs: { stocks: codes.join(","), period: "90d", chat_id: chatId || "" },
+        }),
+      },
+    );
     if (res.status === 204) return { ok: true, detail: "" };
     const body = (await res.text()).slice(0, 160).replace(/\s+/g, " ");
     const detail =
       res.status === 401 || res.status === 403
         ? `HTTP ${res.status}（GH_TOKEN 过期或无 workflow 权限，去 /health?check=1 校验）${body}`
-        : `HTTP ${res.status} ${body}`;
+        : res.status === 404
+          ? `HTTP 404（仓库或工作流文件名不对：${owner}/${repo}/actions/workflows/${workflow}）${body}`
+          : `HTTP ${res.status} ${body}`;
     noteFailure("派发 Actions", detail);
     return { ok: false, detail };
   } catch (err) {
@@ -916,6 +923,21 @@ export default {
         }
       } catch (err) {
         lines.push(`GitHub token：失败 ${err}`);
+      }
+      // workflow 元信息可达性：仓库名 / 文件名任一写错都会 404，
+      // 这正是「派发失败 HTTP 404」的根因，所以自检必须单独看一眼这条 URL
+      try {
+        const headers = await authHeaders(env);
+        const [repo, workflow] = QUERY_TARGET.split("/");
+        const wfUrl = `${API}/repos/${(env.OWNER || "Wind866").trim()}/${repo}/actions/workflows/${workflow}`;
+        const res = await fetch(wfUrl, { headers });
+        lines.push(
+          res.ok
+            ? `个股查询 workflow：OK（${repo}/actions/workflows/${workflow}）`
+            : `个股查询 workflow：失败 HTTP ${res.status}（${wfUrl}）`,
+        );
+      } catch (err) {
+        lines.push(`个股查询 workflow：异常 ${err}`);
       }
       if (url.searchParams.get("dispatch") === "1") {
         // 真调一次 dispatch（目标是对账工作流，只读、无副作用），用来验证 token 到底能不能派发

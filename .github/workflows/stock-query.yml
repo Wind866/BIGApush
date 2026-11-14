@@ -19,6 +19,11 @@ on:
         required: false
         default: '90d'
         type: string
+      chat_id:
+        description: '（一般不用填）由飞书机器人自动带入：把结果发回提问的那个会话'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -53,6 +58,10 @@ jobs:
       - name: 分析并推送飞书
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          # 群里发代码触发时，Worker 会把 chat_id 传下来 → 结果回到那个群
+          FEISHU_CHAT_ID: ${{ inputs.chat_id }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           STOCK_CODES: ${{ inputs.stocks }}
           PERIOD: ${{ inputs.period }}
         run: python stock_query.py

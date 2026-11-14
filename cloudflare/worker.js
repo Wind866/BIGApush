@@ -20,8 +20,18 @@
  *                           BIGApush / limit-up-relay / etf-feishu-push
  *   ALERT_WEBHOOK   Secret  独立的飞书机器人 webhook，用于调度失败告警
  *                           （不要和业务推送共用同一个，否则 webhook 挂了告警也发不出去）
+ *   FEISHU_APP_ID      Secret  自建应用 App ID（cli_ 开头），用于「群里发代码查个股」
+ *   FEISHU_APP_SECRET  Secret  自建应用 App Secret
+ *   FEISHU_ENCRYPT_KEY Secret  可选，飞书后台开了加密策略时才需要
  *   OWNER           Text    Wind866
  *   BRANCH          Text    main
+ *
+ * 路由
+ * ----
+ *   GET  /            说明
+ *   GET  /health      档期表与配置状态（?check=1 顺带验 GH_TOKEN）
+ *   GET  /test?at=HH:MM  手动触发某档期
+ *   POST /feishu      飞书事件回调（im.message.receive_v1 → 触发个股查询）
  *
  * 部署前必读
  * ----------
@@ -38,7 +48,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.1";
+const BUILD = "2026-11-14.2";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -285,6 +295,228 @@ function json(obj, status = 200) {
   });
 }
 
+// ============================================================================
+// 飞书机器人：群里发 6 位股票代码 → 触发 stock-query.yml → 结果推回群
+// ============================================================================
+//
+// 为什么要自建应用，而不是沿用「自定义机器人 webhook」
+// ------------------------------------------------
+// 群自定义机器人（FEISHU_WEBHOOK）只能往外发，收不到群里说的话 —— 所以
+// 「在飞书输入代码查股票」用 webhook 做不到。要双向只能走**自建应用**：
+// 飞书把 im.message.receive_v1 事件 POST 到本 Worker 的 /feishu 路由，
+// 这里解析代码 → dispatch GitHub Actions → 结论由 stock-query.yml 推回群。
+//
+// 需要配置的 Secrets（npx wrangler secret put 名称）
+// ----------------------------------------------
+//   FEISHU_APP_ID       自建应用 App ID（cli_ 开头）
+//   FEISHU_APP_SECRET   自建应用 App Secret
+//   FEISHU_ENCRYPT_KEY  可选。飞书后台开了「加密策略」才需要，不配则按明文解析
+//
+// 飞书开放平台侧（一次性）
+// ----------------------
+//   1. 权限：im:message（收发群/单聊消息）、im:message:send_as_bot
+//   2. 事件订阅：im.message.receive_v1 → 请求地址 https://<本 Worker 域名>/feishu
+//   3. 开启机器人能力，并把机器人拉进目标群
+//   4. 若填了 Encrypt Key，事件会整包加密下发，本文件用 AES-256-CBC 自行解密
+
+const FEISHU_API = "https://open.feishu.cn/open-apis";
+const QUERY_TARGET = "BIGApush/stock-query.yml";
+const MAX_QUERY_CODES = 6;
+// 同一组代码 90 秒内只触发一次：飞书 3 秒没收到 200 会重投，连发同一条也常见
+const CODE_COOLDOWN_MS = 90 * 1000;
+
+// Worker 实例存活期内的事件去重表（CF 不保证同一实例处理重投，尽力而为）
+const seenEvents = new Map();
+let feishuTokenCache = { token: "", exp: 0 };
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** 飞书事件加密：AES-256-CBC，key=SHA256(encrypt_key)，iv=密文前 16 字节 */
+async function decryptFeishu(encrypted, encryptKey) {
+  const keyRaw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(encryptKey));
+  const bytes = Uint8Array.from(atob(encrypted.replace(/\s/g, "")), (c) => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", keyRaw, { name: "AES-CBC" }, false, ["decrypt"]);
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-CBC", iv: bytes.slice(0, 16) },
+    key,
+    bytes.slice(16),
+  );
+  return new TextDecoder().decode(plain);
+}
+
+async function feishuToken(env) {
+  if (feishuTokenCache.token && Date.now() < feishuTokenCache.exp) return feishuTokenCache.token;
+  const appId = (env.FEISHU_APP_ID || "").trim();
+  const secret = (env.FEISHU_APP_SECRET || "").trim();
+  if (!appId || !secret) throw new Error("未配置 FEISHU_APP_ID / FEISHU_APP_SECRET");
+
+  const res = await fetch(`${FEISHU_API}/auth/v3/tenant_access_token/internal`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ app_id: appId, app_secret: secret }),
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`tenant_access_token 失败 ${data.code} ${data.msg}`);
+
+  // 提前 2 分钟过期，避免边界上拿到刚失效的 token
+  const ttl = Math.max(60, (data.expire || 7200) - 120);
+  feishuTokenCache = { token: data.tenant_access_token, exp: Date.now() + ttl * 1000 };
+  return feishuTokenCache.token;
+}
+
+async function feishuSend(env, chatId, text) {
+  try {
+    const token = await feishuToken(env);
+    const res = await fetch(`${FEISHU_API}/im/v1/messages?receive_id_type=chat_id`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      }),
+    });
+    const data = await res.json();
+    if (data.code !== 0) console.error(`[FEISHU] 回复失败 ${data.code} ${data.msg}`);
+  } catch (err) {
+    console.error(`[FEISHU] 回复异常 ${err}`);
+  }
+}
+
+/** 带 inputs 的 dispatch（dispatchOne 故意不传 inputs，这里需要传代码与 chat_id） */
+async function dispatchQuery(env, codes, chatId) {
+  const owner = (env.OWNER || "Wind866").trim();
+  const branch = (env.BRANCH || "main").trim();
+  try {
+    const headers = await authHeaders(env);
+    const res = await fetch(`${API}/repos/${owner}/${QUERY_TARGET}/dispatches`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      // 带上 chat_id：workflow 跑完把结论发回提问的那个会话（群里问就回群里），
+      // 而不是只发到 FEISHU_WEBHOOK 绑定的那个群
+      body: JSON.stringify({
+        ref: branch,
+        inputs: { stocks: codes.join(","), period: "90d", chat_id: chatId || "" },
+      }),
+    });
+    if (res.status === 204) return true;
+    console.error(`[FEISHU] dispatch 失败 HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    return false;
+  } catch (err) {
+    console.error(`[FEISHU] dispatch 异常 ${err}`);
+    return false;
+  }
+}
+
+/** 「600519, 000001 帮我看看」→ ['600519','000001']；纯闲聊返回空数组 */
+function extractCodes(text) {
+  // @机器人 在正文里是 @_user_1 这种占位符，先剔掉，避免误抓数字
+  const cleaned = (text || "").replace(/@_user_\d+/g, " ");
+  const found = cleaned.match(/(?<!\d)\d{6}(?!\d)/g) || [];
+  return [...new Set(found)].slice(0, MAX_QUERY_CODES);
+}
+
+async function handleFeishuMessage(env, event) {
+  const msg = (event && event.message) || {};
+  const sender = (event && event.sender) || {};
+  // 别回自己：机器人发的消息也会进事件流
+  if ((sender.sender_type || "user") === "app") return;
+
+  const chatId = msg.chat_id || "";
+  if (!chatId) return;
+
+  if (msg.message_type && msg.message_type !== "text") {
+    await feishuSend(env, chatId, "只认文本股票代码，例如：600519 或 600519,000001（最多 6 只）");
+    return;
+  }
+
+  let text = "";
+  try {
+    text = JSON.parse(msg.content || "{}").text || "";
+  } catch {
+    text = msg.content || "";
+  }
+
+  const codes = extractCodes(text);
+  // 抓不到 6 位代码就当普通聊天，不回应 —— 否则机器人会在群里刷屏
+  if (!codes.length) return;
+
+  const key = codes.join(",");
+  const last = seenEvents.get(`q:${key}`) || 0;
+  if (Date.now() - last < CODE_COOLDOWN_MS) {
+    await feishuSend(env, chatId, `⏳ ${key} 刚查过，结果约 1 分钟到，请稍等`);
+    return;
+  }
+  seenEvents.set(`q:${key}`, Date.now());
+  if (seenEvents.size > 200) seenEvents.clear();
+
+  console.log(`[FEISHU] 收到查询 ${key} chat=${chatId}`);
+  await feishuSend(env, chatId, `🔍 已收到 ${key}，正在跑真实数据（估值/资金流/财务），约 1~2 分钟把完整分析发到群里。`);
+
+  const ok = await dispatchQuery(env, codes, chatId);
+  if (!ok) {
+    await feishuSend(env, chatId, "❌ 触发分析任务失败（GH_TOKEN 可能已过期），请查看 Worker 日志。");
+  }
+}
+
+async function handleFeishu(req, env, ctx) {
+  const raw = await req.text();
+  const encryptKey = (env.FEISHU_ENCRYPT_KEY || "").trim();
+
+  // 签名只在配了 Encrypt Key 时下发，没有就跳过校验（明文模式飞书不签名）
+  const timestamp = req.headers.get("X-Lark-Request-Timestamp") || "";
+  const nonce = req.headers.get("X-Lark-Request-Nonce") || "";
+  const signature = req.headers.get("X-Lark-Signature") || "";
+  if (encryptKey && signature) {
+    const expect = await sha256Hex(timestamp + nonce + encryptKey + raw);
+    if (expect !== signature) {
+      console.log("[FEISHU] 签名校验失败，已拒绝");
+      return json({ code: 1, msg: "invalid signature" }, 401);
+    }
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return json({ code: 1, msg: "bad json" }, 400);
+  }
+
+  if (payload.encrypt) {
+    if (!encryptKey) {
+      return json({ code: 1, msg: "event encrypted but FEISHU_ENCRYPT_KEY missing" }, 400);
+    }
+    try {
+      payload = JSON.parse(await decryptFeishu(payload.encrypt, encryptKey));
+    } catch (err) {
+      console.error(`[FEISHU] 解密失败 ${err}`);
+      return json({ code: 1, msg: "decrypt failed" }, 400);
+    }
+  }
+
+  // 在开放平台保存请求地址时飞书会先打一发，必须原样回 challenge
+  if (payload.type === "url_verification") {
+    return json({ challenge: payload.challenge });
+  }
+
+  const header = payload.header || {};
+  const eventId = header.event_id || "";
+  if (eventId && seenEvents.has(`evt:${eventId}`)) return json({ code: 0 });
+  if (eventId) seenEvents.set(`evt:${eventId}`, Date.now());
+
+  if (header.event_type === "im.message.receive_v1") {
+    // 飞书 3 秒内收不到 200 会重投，所以先回 200，慢活在 waitUntil 里跑
+    ctx.waitUntil(handleFeishuMessage(env, payload.event));
+    return json({ code: 0 });
+  }
+
+  console.log(`[FEISHU] 忽略事件 ${header.event_type || payload.type || "unknown"}`);
+  return json({ code: 0 });
+}
+
 export default {
   async scheduled(event, env, ctx) {
     // 必须用 cron 的计划时刻，不能用 Date.now()：Worker 冷启动 / CF 调度抖动
@@ -316,8 +548,18 @@ export default {
     }
   },
 
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
+
+    // 飞书自建应用的事件订阅入口：群里发 6 位代码 → dispatch stock-query.yml
+    if (url.pathname === "/feishu") {
+      if (req.method !== "POST") {
+        return new Response("飞书事件回调端点（接收 POST）。把本地址填进飞书开放平台的事件订阅请求地址。\n", {
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      }
+      return handleFeishu(req, env, ctx);
+    }
 
     if (url.pathname === "/health") {
       let tokenValid = null;
@@ -358,7 +600,7 @@ export default {
     }
 
     return new Response(
-      "GitHub Actions 统一准点调度器\n\n/health            查看档期表与配置状态\n/health?check=1     校验 GH_TOKEN\n/test?at=22:13     手动触发某个档期（自测用）\n",
+      "GitHub Actions 统一准点调度器\n\n/health            查看档期表与配置状态\n/health?check=1     校验 GH_TOKEN\n/test?at=22:13     手动触发某个档期（自测用）\n/feishu            POST，飞书事件回调用（群里发股票代码查个股）\n",
       { headers: { "content-type": "text/plain; charset=utf-8" } },
     );
   },

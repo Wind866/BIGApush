@@ -491,9 +491,9 @@ async function handleQuery(env, codes, chatId) {
 // 代价：响应延迟最多一个轮询间隔（这里取 2 分钟），不是秒回。
 //
 // 需要的权限（飞书开放平台 → 权限管理，开完必须发布版本）
-//   im:message                    收发消息
+//   im:message 或 im:message:readonly 或 im:message.history:readonly
+//                                 读群历史消息（im/v1/messages 三者任一即可）
 //   im:message:send_as_bot        以机器人身份发消息
-//   im:message.group_msg          获取群组中所有消息（读历史，敏感权限）
 //   im:chat:readonly              获取机器人所在群列表（自动找 chat_id 用，可选：
 //                                 直接在变量里配 FEISHU_CHAT_ID 就不需要这个权限）
 

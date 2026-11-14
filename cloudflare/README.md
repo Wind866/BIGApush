@@ -180,10 +180,9 @@ GitHub Actions 跑真实取数 → 结论推回提问的那个群
 
 | 权限 | 用途 |
 | --- | --- |
-| `im:message` | 收发群消息 |
+| `im:message` **或** `im:message:readonly` **或** `im:message.history:readonly` | **轮询读群消息必需**（三者任一即可，实测报错会列出这三个） |
 | `im:message:send_as_bot` | 以机器人身份发回执 |
-| `im:message.group_msg` | **轮询读群历史消息必需**（敏感权限，自建应用自己审批即可） |
-| `im:chat:readonly` | 可选，自动发现机器人所在的群；配了 `FEISHU_CHAT_ID` 就不需要 |
+| `im:chat:readonly` | 列出机器人所在的群；不开会静默返回 0 个群 |
 
 开完要**发布版本**（创建版本 → 申请发布），权限才生效。只加权限不发布 = 仍然 99991672。
 
@@ -251,7 +250,7 @@ https://<域名>/feishu/poll
 | 报错 | 原因 |
 | --- | --- |
 | `im/v1/chats 失败 99991672` | 权限没开或没发布版本（`im:chat:readonly`） |
-| `im/v1/messages 失败 99991672` | 缺 `im:message.group_msg` 或没发布版本 |
+| `im/v1/messages 失败 99991672` | 缺 `im:message` / `im:message:readonly` / `im:message.history:readonly` 之一；报错正文会列出这三个 |
 | `bot/v3/info 失败 ...` | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` 配错 |
 | `扫描群数：0` | 机器人不在任何群里，先拉进群 |
 

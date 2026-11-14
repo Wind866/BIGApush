@@ -56,7 +56,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.5";
+const BUILD = "2026-11-14.6";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -559,6 +559,74 @@ function msgTimeMs(it) {
   return t < 1e12 ? t * 1000 : t;
 }
 
+/** 从消息体里把可读文本捞出来：text 直接取，post（富文本）递归拼 */
+function messageText(it) {
+  const rawContent = (it.body || {}).content || "";
+  let obj;
+  try {
+    obj = JSON.parse(rawContent);
+  } catch {
+    return rawContent;
+  }
+  if (typeof obj.text === "string") return obj.text;
+  const parts = [];
+  const walk = (n) => {
+    if (!n) return;
+    if (Array.isArray(n)) {
+      n.forEach(walk);
+      return;
+    }
+    if (typeof n === "object") {
+      if (typeof n.text === "string") parts.push(n.text);
+      if (n.tag === "at" && n.user_name) parts.push("@" + n.user_name);
+      if (n.content) walk(n.content);
+    }
+  };
+  walk(obj.title);
+  walk(obj.content);
+  return parts.join(" ");
+}
+
+/** 消息里的 @ 列表（open_id / user_id 都收，不同接口给的不一样） */
+function mentionsOf(it) {
+  return (it.mentions || [])
+    .map((m) => {
+      const id = m.id || {};
+      return { id: id.open_id || id.user_id || "", name: m.name || "" };
+    })
+    .filter((m) => m.id || m.name);
+}
+
+/** 这条消息是不是 @ 了本机器人 */
+function isMentionedBot(it, bot) {
+  const mentions = mentionsOf(it);
+  if (bot.id && mentions.some((m) => m.id === bot.id)) return true;
+  // 兼容只给名字、或 open_id 与 bot/v3/info 不一致的情况
+  if (bot.name && mentions.some((m) => m.name === bot.name)) return true;
+  if (bot.name && messageText(it).includes("@" + bot.name)) return true;
+  return false;
+}
+
+/**
+ * 判定一条消息要不要处理，并给出「为什么跳过」——
+ * /feishu/poll 会把它原样显示出来，省得反复猜（以前只有「命中」和沉默两种结果）。
+ */
+function evaluateMessage(it, bot) {
+  const type = it.msg_type || "?";
+  const senderType = (it.sender || {}).sender_type || "user";
+  const text = messageText(it);
+  const codes = extractCodes(text);
+  const mentions = mentionsOf(it);
+
+  let skip = "";
+  if (senderType === "app") skip = "机器人自己发的";
+  else if (type !== "text" && type !== "post") skip = `类型 ${type}`;
+  else if (!isMentionedBot(it, bot)) skip = "没@机器人";
+  else if (!codes.length) skip = "文里没有 6 位代码";
+
+  return { type, senderType, text, codes, mentions, skip };
+}
+
 /**
  * 扫一遍所有群，处理 @机器人 + 6 位代码 的消息。
  * 返回一份人类可读的报告（/feishu/poll 会直接把它显示在浏览器里，便于自检）。
@@ -602,29 +670,29 @@ async function pollFeishu(env) {
       ? `最新一条 ${Math.max(0, Math.round((Date.now() - newest) / 1000))} 秒前`
       : "读不到时间戳";
     report.push(`  ${chatId} 最近 ${fetched} 条（${newestText}），落在窗口内 ${items.length} 条`);
+
+    let shown = 0;
     // 接口是时间倒序，翻过来正序处理，保证「先问先答」
     for (const it of items.slice().reverse()) {
       const id = it.message_id || "";
-      if (!id || pollSeen.has(id)) continue;
+      const v = evaluateMessage(it, bot);
+      const seen = Boolean(id) && pollSeen.has(id);
+
+      // 把判定结果打出来（即使已经处理过、即使要跳过），否则线上只能看到「处理 0 条」干瞪眼
+      if (shown < 6) {
+        shown += 1;
+        const age = Math.max(0, Math.round((Date.now() - msgTimeMs(it)) / 1000));
+        const mt = v.mentions.length ? v.mentions.map((m) => m.id || m.name).join("|") : "无";
+        let verdict;
+        if (v.skip) verdict = `跳过（${v.skip}）`;
+        else if (seen) verdict = `已在上一轮处理过 ${v.codes.join(",")}`;
+        else verdict = `触发 ${v.codes.join(",")}`;
+        report.push(`    · ${id.slice(-8) || "无id"} ${age}s前 ${v.type}/${v.senderType} 提及=${mt} 代码=${v.codes.join(",") || "无"} → ${verdict}`);
+      }
+      if (v.skip || seen || !id) continue;
       pollSeen.set(id, Date.now());
 
-      if (((it.sender || {}).sender_type || "user") === "app") continue;   // 不处理机器人自己发的
-      if (it.msg_type !== "text") continue;
-      // 必须 @ 了本机器人：群里别人的 6 位数字（订单号、金额）不该被当成股票代码
-      const mentioned = (it.mentions || []).some((m) => ((m.id || {}).open_id || "") === bot.id);
-      if (!mentioned) continue;
-
-      let text = "";
-      try {
-        text = JSON.parse((it.body || {}).content || "{}").text || "";
-      } catch {
-        text = "";
-      }
-      const codes = extractCodes(text);
-      if (!codes.length) continue;
-
-      report.push(`  → 命中 ${codes.join(",")}（${id}）`);
-      await handleQuery(env, codes, chatId);
+      await handleQuery(env, v.codes, chatId);
       handled += 1;
     }
   }

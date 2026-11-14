@@ -70,7 +70,8 @@ jobs:
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           # 群里发代码触发时，Worker 会把 chat_id 传下来 → 结果回到那个群
-          FEISHU_CHAT_ID: ${{ inputs.chat_id }}
+          # 群里触发时由 Worker 带入；网页手动跑时可留空，改用仓库变量 FEISHU_CHAT_ID（设一次即可）
+          FEISHU_CHAT_ID: ${{ inputs.chat_id || vars.FEISHU_CHAT_ID }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           STOCK_CODES: ${{ inputs.stocks }}

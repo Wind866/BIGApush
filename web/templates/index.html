@@ -269,6 +269,9 @@
                 <li class="nav-item" data-page="analysis">
                     <span class="icon">📈</span> 个股图谱
                 </li>
+                <li class="nav-item" data-page="stock-deep">
+                    <span class="icon">🔍</span> 个股深度分析
+                </li>
                 <li class="nav-item" data-page="stock-ranking">
                     <span class="icon">🏆</span> 选股排名
                 </li>
@@ -1581,6 +1584,50 @@
                     </div><!-- /score-result-container -->
                 </div>
                 
+                <!-- 个股深度分析页 -->
+                <div id="stock-deep-page" class="page">
+                    <div class="card" id="deep-query-card">
+                        <div class="card-body">
+                            <form id="deep-form" class="analysis-form" role="search" aria-label="个股深度分析查询">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label for="deep-stock-code">股票代码</label>
+                                        <input type="text" id="deep-stock-code" name="stock-code"
+                                               placeholder="例如: 600519" maxlength="6"
+                                               pattern="[0-9]{6}" required
+                                               aria-required="true" autocomplete="off">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="deep-period">分析周期</label>
+                                        <select id="deep-period" name="period">
+                                            <option value="30d">近30日</option>
+                                            <option value="60d">近60日</option>
+                                            <option value="90d" selected>近90日</option>
+                                            <option value="120d">近120日</option>
+                                            <option value="180d">近180日</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <button type="submit" id="deep-query-btn" class="btn btn-primary">
+                                            <span id="deep-btn-text">深度分析</span>
+                                            <span id="deep-loading" class="loading-spinner" style="display:none;" aria-hidden="true">⏳</span>
+                                        </button>
+                                    </div>
+                                </div>
+                                <p class="form-hint">输入任意 A 股 6 位代码，查看策略信号、买入建议、资金流向与基本面/业绩（估值与财报来自 AKShare 实时数据）。</p>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div id="deep-loading-state" class="card" style="display:none;" role="status" aria-live="polite">
+                        <div class="card-body" style="text-align:center; color:#6b7280;">正在分析，请稍候…</div>
+                    </div>
+                    <div id="deep-error-state" class="card" style="display:none;">
+                        <div class="card-body" style="color:#dc2626;" id="deep-error-msg"></div>
+                    </div>
+                    <div id="stock-deep-result"></div>
+                </div>
+
                 <!-- 选股排名页 -->
                 <div id="stock-ranking-page" class="page">
                     <div class="card">

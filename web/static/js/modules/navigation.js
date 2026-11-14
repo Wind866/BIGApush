@@ -40,6 +40,7 @@ export function switchPage(page) {
         'transactions': '交易历史',
         'strategies': '策略配置',
         'analysis': '个股图谱',
+        'stock-deep': '个股深度分析',
         'stock-ranking': '选股排名',
         'ranking-track': '排名跟踪',
         'backtest-params': '回测配置',
@@ -92,6 +93,9 @@ export function switchPage(page) {
     } else if (page === 'analysis') {
         // 个股图谱页面 - 重置状态
         import('./analysis.js').then(module => module.resetScorePageState());
+    } else if (page === 'stock-deep') {
+        // 个股深度分析页面 - 初始化
+        import('./stock_deep.js').then(module => module.initStockDeepPage());
     } else if (page === 'stock-ranking') {
         // 选股排名页面 - 初始化
         import('./ranking.js').then(module => module.initStockRankingPage());

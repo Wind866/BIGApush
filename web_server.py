@@ -115,6 +115,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from stock_analyzer import StockAnalyzer
+from stock_analyzer.real_fundamentals import enrich_fundamental, get_real_valuation, get_real_financials
+from stock_analyzer.advisor import build_strategy_analysis, build_buy_advice
 from utils.strategy_name_mapper import STRATEGY_NAME_MAP, get_chinese_name
 
 app = Flask(__name__, 
@@ -2143,6 +2145,99 @@ def get_selection_history():
 # ==================== 股票分析相关路由 ====================
 
 
+
+
+def _clean_and_dump(obj):
+    """递归清理 NaN/Infinity 并序列化为成功响应 JSON 字符串（供分析类接口复用）。"""
+    import json
+    def convert(o):
+        if isinstance(o, dict):
+            return {k: convert(v) for k, v in o.items()}
+        elif isinstance(o, list):
+            return [convert(i) for i in o]
+        elif isinstance(o, float):
+            return None if (math.isnan(o) or math.isinf(o)) else o
+        elif hasattr(o, 'item'):
+            val = o.item()
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                return None
+            return val
+        elif isinstance(o, np.ndarray):
+            return convert(o.tolist())
+        elif isinstance(o, pd.Timestamp):
+            return o.strftime('%Y-%m-%d %H:%M:%S')
+        elif hasattr(o, 'dtype'):
+            val = o.item()
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                return None
+            return val
+        else:
+            return o
+    obj = convert(obj)
+    def default_handler(o):
+        if isinstance(o, np.integer):
+            return int(o)
+        elif isinstance(o, np.floating):
+            val = float(o)
+            return None if (math.isnan(val) or math.isinf(val)) else val
+        elif isinstance(o, np.ndarray):
+            return convert(o.tolist())
+        elif isinstance(o, pd.Timestamp):
+            return o.strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            return o
+    return json.dumps({'success': True, 'data': obj}, default=default_handler)
+
+
+@app.route('/api/stock/deep-analysis', methods=['POST'])
+def stock_deep_analysis():
+    """
+    个股深度分析：策略分析 + 买入建议 + 资金流向 + 基本面/业绩（真实数据）。
+
+    参数：stock_code, period
+    返回：{success, data:{stock_info, technical, fundamental, fund_flow,
+                            sector, conclusion, strategy_analysis, buy_advice}}
+    """
+    try:
+        data = request.json or {}
+        stock_code = data.get('stock_code', '')
+        period = data.get('period', '90d')
+        if not stock_code:
+            return jsonify({'success': False, 'message': '股票代码不能为空'})
+
+        analysis = stock_analyzer.analyze(stock_code, period=period)
+        if not analysis:
+            return jsonify({'success': False, 'message': '分析失败'})
+
+        # 真实基本面/业绩：失败自动回退到原模拟值，保证页面不崩
+        real_val, real_fin = {}, {}
+        try:
+            analysis['fundamental'] = enrich_fundamental(stock_code, analysis.get('fundamental'))
+            real_val = get_real_valuation(stock_code)
+            real_fin = get_real_financials(stock_code)
+        except Exception as e:
+            logger.warning(f"真实基本面获取失败，使用原值: {e}")
+
+        strategy_analysis = build_strategy_analysis(analysis)
+        buy_advice = build_buy_advice(analysis, real_val, real_fin)
+
+        payload = {
+            'stock_info': analysis.get('stock_info'),
+            'technical': analysis.get('technical'),
+            'fundamental': analysis.get('fundamental'),
+            'fund_flow': analysis.get('fund_flow'),
+            'sector': analysis.get('sector'),
+            'conclusion': analysis.get('conclusion'),
+            'strategy_analysis': strategy_analysis,
+            'buy_advice': buy_advice,
+        }
+        return app.response_class(
+            response=_clean_and_dump(payload),
+            mimetype='application/json'
+        )
+    except Exception as e:
+        logger.error(f"深度分析失败: {str(e)}")
+        return jsonify({'success': False, 'message': str(e)})
 
 
 @app.route('/api/analyze-stock', methods=['POST'])

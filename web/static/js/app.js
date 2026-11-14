@@ -52,6 +52,7 @@ async function loadModules() {
         const stocksModule = await import('./modules/stocks.js');
         const selectionModule = await import('./modules/selection.js');
         const analysisModule = await import('./modules/analysis.js');
+        const stockDeepModule = await import('./modules/stock_deep.js');
         const strategiesModule = await import('./modules/strategies.js');
         const historyModule = await import('./modules/history.js');
         const rankingModule = await import('./modules/ranking.js');
@@ -71,6 +72,7 @@ async function loadModules() {
             stocks: stocksModule,
             selection: selectionModule,
             analysis: analysisModule,
+            stockDeep: stockDeepModule,
             strategies: strategiesModule,
             history: historyModule,
             ranking: rankingModule,

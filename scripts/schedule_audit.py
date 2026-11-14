@@ -105,6 +105,11 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                 row["status"] = "— 非当日档期"
                 rows.append(row)
                 continue
+            # 计划时刻还没到（白天查 22:13 的档期）不能算「未到」，否则对账天天报假警
+            if planned > datetime.now(BJ):
+                row["status"] = "⏳ 未到时刻"
+                rows.append(row)
+                continue
             if not token:
                 row["status"] = "⬜ 未覆盖"
                 row["note"] = "需配置 AUDIT_PAT 才能读此仓库的 Actions 记录"
@@ -122,6 +127,12 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                 rows.append(row)
                 continue
 
+            # 档期窗口＝[计划时刻 − 5 分钟, 计划时刻 + 6 小时]，允许跨日。
+            # 旧实现按「日历日」收集当天全部触发再取最早，会把*前一个档期*迟到的运行
+            # 算到本档期头上：晚间新闻 22:13 次日 00:18 到达，会被记成「实到 00:18、
+            # 偏差 −1314 分」；反过来当晚真的没跑时又要等到次日才看得见。
+            window_lo = planned - timedelta(minutes=5)
+            window_hi = planned + timedelta(hours=6)
             hits = []
             for run in runs:
                 if run.get("workflow_id") != wid:
@@ -131,7 +142,7 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                 created = datetime.fromisoformat(
                     run["created_at"].replace("Z", "+00:00")
                 ).astimezone(BJ)
-                if created.date().isoformat() == day:
+                if window_lo <= created <= window_hi:
                     hits.append(created)
             if not hits:
                 row["status"] = "❌ 未到"
@@ -168,7 +179,7 @@ def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
     lines += [
         "",
         "> ✅ 偏差 ≤5 分钟；⚠️ 有触发但延迟（GitHub cron 兜底常晚数小时）；"
-        "❌ 应到且可核对，但当天没有任何触发记录。",
+        "❌ 应到且可核对，但当天没有任何触发记录；⏳ 计划时刻还没到，本次不判定。",
         "",
     ]
     return "\n".join(lines)

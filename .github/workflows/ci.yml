@@ -39,6 +39,9 @@ jobs:
           cp cloudflare/worker.js /tmp/worker.mjs
           node --check /tmp/worker.mjs
 
+      - name: Worker 轮询去重回归（同一件事只做一次）
+        run: node tests/test_worker_dedupe.mjs
+
       - name: 工作流配置解析
         run: |
           python - <<'PY'

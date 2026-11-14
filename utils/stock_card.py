@@ -37,6 +37,16 @@ LINE = "#e6e8eb"        # 分隔线
 PANEL = "#f6f7f9"       # 浅灰底
 BG = "#ffffff"
 
+# 均线：短期（5/10）看节奏，中期（20）看趋势，长期（60）看多空分界。
+# 颜色避开红绿（那两位已经被涨跌占用了），用橙/紫/蓝/深灰区分。
+MAS = (
+    (5, "#f0a63d"),
+    (10, "#a855f7"),
+    (20, "#3b82f6"),
+    (60, "#374151"),
+)
+KLINE_BARS = 120  # 画多少根 K 线；MA60 需要至少 60 根，90 根时开头会缺一大截
+
 FONT_FILES = (
     # Linux runner（workflow 里 apt-get install fonts-noto-cjk 后就有）
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -213,7 +223,10 @@ def _draw_header(fig, *, name, code, market, industry, price, pct, cap):
 
 
 def _draw_kline(fig, hist, name, rect, vol_rect=None):
-    """K 线 + MA5/MA20 + 成交量。
+    """K 线 + MA5/MA10/MA20/MA60 + 成交量。
+
+    四条均线是看盘的基本盘：短期（5/10）看节奏，中期（20）看趋势，长期（60）
+    看多空分界。图例里直接带上当前值，比只写「MA20」有用得多。
 
     hist 为空时只画一条窄提示条（不占整块图高，否则卡片中间会空一大片）。
     """
@@ -238,7 +251,8 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
         vol_ax.set_axis_off()
         return
 
-    df = hist.tail(90).reset_index(drop=True)
+    # 120 根才够 MA60 画出像样的曲线（tail(90) 时 MA60 只有 31 个点，开头一节是空的）
+    df = hist.tail(KLINE_BARS).reset_index(drop=True)
     opens = [float(x) for x in df["open"]]
     closes = [float(x) for x in df["close"]]
     highs = [float(x) for x in df["high"]]
@@ -265,8 +279,13 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
                 out.append(sum(values[i + 1 - window:i + 1]) / window)
         return out
 
-    price_ax.plot(xs, _ma(closes, 5), color="#e8a33d", linewidth=1.3, label="MA5")
-    price_ax.plot(xs, _ma(closes, 20), color="#4a7fd4", linewidth=1.3, label="MA20")
+    for window, color in MAS:
+        if len(df) < window:  # 数据不够这条均线就不画，避免半截线误导
+            continue
+        series = _ma(closes, window)
+        last = series[-1]
+        price_ax.plot(xs, series, color=color, linewidth=1.2,
+                      label=f"MA{window} {last:.2f}")
 
     price_ax.set_xlim(-1, len(df))
     price_ax.grid(axis="y", color=LINE, linewidth=0.7)
@@ -277,19 +296,36 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
     price_ax.tick_params(axis="y", labelsize=9, colors=SUB, length=0)
     # x 轴日期刻度画在成交量轴上（最底下），画在上面会和「成交量」标题挤在一起
     price_ax.tick_params(axis="x", labelbottom=False, length=0)
-    price_ax.legend(loc="upper left", fontsize=9, frameon=False, ncol=2,
-                    prop={"family": _font_name, "size": 9})
+    # 四条均线放在图外顶部（右对齐），不压在 K 线上；左侧标题写「近 N 个交易日」
+    price_ax.legend(loc="lower right", bbox_to_anchor=(1, 1.005), ncol=len(MAS),
+                    fontsize=8.5, frameon=False, borderaxespad=0,
+                    handlelength=1.5, columnspacing=1.2, handletextpad=0.5,
+                    prop={"family": _font_name, "size": 8.5})
     price_ax.set_title(f"{name} 近 {len(df)} 个交易日", loc="left", fontsize=11.5,
                        color=SUB, family=_font_name, pad=6)
 
     vol_colors = [UP if c >= o else DOWN for o, c in zip(opens, closes)]
-    # 成交量换成「万」为单位：原始股数动辄 7 位数，y 轴会挤成 1e6 看不清
-    vol_ax.bar(xs, [v / 1e4 for v in vols], color=vol_colors, width=0.64, linewidth=0)
+    # 成交量按量级换单位：原始股数动辄 8~9 位，y 轴会挤成 1e8 看不清
+    vmax = max(vols) if vols else 0
+    if vmax >= 1e8:
+        unit, div = "亿", 1e8
+    elif vmax >= 1e4:
+        unit, div = "万", 1e4
+    else:
+        unit, div = "", 1
+    vol_ax.bar(xs, [v / div for v in vols], color=vol_colors, width=0.64, linewidth=0)
     vol_ax.set_xlim(-1, len(df))
     vol_ax.grid(axis="y", color=LINE, linewidth=0.6)
     vol_ax.set_axisbelow(True)
-    vol_ax.set_title("成交量（万）", loc="left", fontsize=8, color=SUB,
-                     family=_font_name, pad=2)
+    vol_ax.set_title(f"成交量（{unit}股）" if unit else "成交量（股）", loc="left",
+                     fontsize=8, color=SUB, family=_font_name, pad=3)
+    # 只留 0 和一个上限刻度：这块本来就只有 0.7 英寸高，三个刻度会和标题打架
+    try:
+        from matplotlib.ticker import MaxNLocator
+
+        vol_ax.yaxis.set_major_locator(MaxNLocator(nbins=2, integer=False))
+    except Exception:  # noqa: BLE001  locator 不可用就用默认刻度
+        pass
     if "date" in df.columns:
         marks = [0, len(df) // 3, (len(df) * 2) // 3, len(df) - 1]
         try:
@@ -297,6 +333,11 @@ def _draw_kline(fig, hist, name, rect, vol_rect=None):
             vol_ax.set_xticks(marks)
             vol_ax.set_xticklabels(labels, fontsize=8, color=SUB, family=_font_name)
             vol_ax.tick_params(axis="x", length=0, pad=2, labelbottom=True)
+            # 首尾两个日期默认居中，会半个字露到画布外（还会压住 y 轴的 0）
+            tick_labels = vol_ax.get_xticklabels()
+            if tick_labels:
+                tick_labels[0].set_ha("left")
+                tick_labels[-1].set_ha("right")
         except Exception:  # noqa: BLE001  日期格式异常就不标，不影响图
             vol_ax.set_xticklabels([])
     for side in ("top", "right", "left"):
@@ -478,7 +519,9 @@ def render_stock_card(
     # 把高度让给指标和结论，避免卡片中间空一大块
     has_chart = hist is not None and len(hist) >= 5
     if has_chart:
-        kline_rect, vol_rect = [0.055, 0.585, 0.90, 0.255], [0.055, 0.505, 0.90, 0.075]
+        # 价格轴底边与成交量轴顶边留 2.3% 图高的间隙：贴在一起时价格轴最下面那个
+        # 刻度会和「成交量（亿股）」标题撞在一行里
+        kline_rect, vol_rect = [0.055, 0.600, 0.90, 0.245], [0.055, 0.505, 0.90, 0.072]
         metrics_rect, advice_rect = [0.05, 0.255, 0.90, 0.225], [0.05, 0.045, 0.90, 0.195]
     else:
         kline_rect, vol_rect = [0.05, 0.735, 0.90, 0.07], None

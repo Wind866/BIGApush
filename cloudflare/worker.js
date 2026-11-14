@@ -57,7 +57,7 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.9";
+const BUILD = "2026-11-14.10";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -336,6 +336,52 @@ const CODE_COOLDOWN_MS = 90 * 1000;
 
 // Worker 实例存活期内的事件去重表（CF 不保证同一实例处理重投，尽力而为）
 const seenEvents = new Map();
+
+// ---- 跨实例去重（Cache API）------------------------------------------------
+// 为什么需要：cron 每分钟唤醒一次，但 CF 不保证复用同一个实例。新实例的
+// pollSeen / seenEvents / notifyAt 全是空的，而冷启动回看 90 秒 > 轮询间隔
+// 60 秒 —— 于是同一条消息会被「上一分钟的实例」和「这一分钟的实例」各处理
+// 一遍，群里就出现两条「已收到」、Actions 也跑两遍（两次图片推送）。
+// Cache 在同一 colo 内能跨实例存活，用它把「消息 id」和「代码」都记一笔。
+const DEDUPE_TTL_SEC = 1800; // 30 分钟足够覆盖任何重试；过期自动失效，不需要清理
+
+function dedupeUrl(key) {
+  // Cache API 只认带 scheme 的 URL，内部不存在的域名不会真的发请求
+  return `https://bigapush-dedupe.internal/${encodeURIComponent(key)}`;
+}
+
+async function dedupeGet(key) {
+  if (typeof caches === "undefined" || !caches.default) return "";
+  try {
+    const hit = await caches.default.match(dedupeUrl(key));
+    return hit ? (await hit.text()).trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+async function dedupeSet(key, value, ttl = DEDUPE_TTL_SEC) {
+  if (typeof caches === "undefined" || !caches.default) return;
+  try {
+    await caches.default.put(
+      dedupeUrl(key),
+      new Response(String(value), {
+        headers: { "cache-control": `max-age=${ttl}`, "content-type": "text/plain" },
+      }),
+    );
+  } catch {
+    // 缓存写失败不影响主流程，退回「实例内去重」——最坏情况还是可能重复，但不会发不出去
+  }
+}
+
+async function dedupeDel(key) {
+  if (typeof caches === "undefined" || !caches.default) return;
+  try {
+    await caches.default.delete(dedupeUrl(key));
+  } catch {
+    // 删不掉就让它在 TTL 后自然过期
+  }
+}
 let feishuTokenCache = { token: "", exp: 0 };
 
 async function sha256Hex(text) {
@@ -491,7 +537,7 @@ async function handleFeishuMessage(env, event) {
   const codes = extractCodes(text);
   // 抓不到 6 位代码就当普通聊天，不回应 —— 否则机器人会在群里刷屏
   if (!codes.length) return;
-  await handleQuery(env, codes, chatId);
+  await handleQuery(env, codes, chatId, msg.message_id || "");
 }
 
 // 同一张单子 5 分钟内只通知一次（回执 / ❌ 都算），避免派发连续失败时每分钟刷屏；
@@ -501,18 +547,50 @@ const NOTIFY_GAP_MS = 5 * 60 * 1000;
 
 /**
  * 冷却 + 回执 + 触发。事件回调与轮询两条路径共用，保证行为一致。
- * 返回 { ok, skipped, receipt, dispatch }，调用方据此决定要不要重试。
+ *
+ * `msgKey` 是飞书的 message_id：同一条消息即使被两个 Worker 实例各扫到一次，
+ * 也只会回执一次、派发一次（否则群里两条「已收到」，Actions 跑两遍推两张图）。
+ *
+ * 返回 { ok, skipped, receipt, dispatch }，skipped 取值：
+ *   ""          正常处理
+ *   "duplicate" 这条消息已被别的实例处理完，本次什么都不做
+ *   "cooldown"  同代码 90 秒内刚派发过，只回一句提示
  */
-async function handleQuery(env, codes, chatId) {
+async function handleQuery(env, codes, chatId, msgKey = "") {
   const key = codes.join(",");
-  const last = seenEvents.get(`q:${key}`) || 0;
-  if (Date.now() - last < CODE_COOLDOWN_MS) {
+  const now = Date.now();
+
+  // ① 消息级去重：先查再占位，两个实例同时扫到也只有先到的那个往下走
+  if (msgKey) {
+    if (await dedupeGet(`msg:${msgKey}`)) {
+      console.log(`[FEISHU] 消息 ${msgKey} 已处理过，跳过`);
+      return {
+        ok: true,
+        skipped: "duplicate",
+        receipt: { ok: true, detail: "" },
+        dispatch: { ok: true, detail: "" },
+      };
+    }
+    await dedupeSet(`msg:${msgKey}`, String(now));
+  }
+
+  // ② 代码级冷却：实例内的 Map 冷启动会丢，所以再查一层 Cache（跨实例生效）
+  const last = Math.max(
+    seenEvents.get(`q:${chatId}:${key}`) || 0,
+    Number(await dedupeGet(`q:${chatId}:${key}`)) || 0,
+  );
+  if (now - last < CODE_COOLDOWN_MS) {
     const receipt = await feishuSend(env, chatId, `⏳ ${key} 刚查过，结果约 1 分钟到，请稍等`);
     return { ok: true, skipped: "cooldown", receipt, dispatch: { ok: true, detail: "" } };
   }
 
   const nkey = `${chatId}|${key}`;
-  const fresh = Date.now() - (notifyAt.get(nkey) || 0) > NOTIFY_GAP_MS;
+  // 回执也要跨实例去重：不然派发失败重试时，新实例会再发一遍「已收到」
+  const notifiedAt = Math.max(
+    notifyAt.get(nkey) || 0,
+    Number(await dedupeGet(`rcpt:${chatId}:${key}`)) || 0,
+  );
+  const fresh = Date.now() - notifiedAt > NOTIFY_GAP_MS;
   let receipt = { ok: true, detail: "", skipped: true };
 
   if (fresh) {
@@ -520,16 +598,22 @@ async function handleQuery(env, codes, chatId) {
     // 回执发失败也要继续派发：群里没发出去不代表任务不该跑
     receipt = await feishuSend(env, chatId, `🔍 已收到 ${key}，正在跑真实数据（估值/资金流/财务），约 1~2 分钟把完整分析发到群里。`);
     notifyAt.set(nkey, Date.now());
+    await dedupeSet(`rcpt:${chatId}:${key}`, String(Date.now()), Math.round(NOTIFY_GAP_MS / 1000));
     if (notifyAt.size > 200) notifyAt.clear();
   }
 
   const dispatched = await dispatchQuery(env, codes, chatId);
   if (dispatched.ok) {
     // 冷却只在真正派发成功后才记，否则失败一次就会把后续重试全挡掉
-    seenEvents.set(`q:${key}`, Date.now());
+    seenEvents.set(`q:${chatId}:${key}`, Date.now());
+    await dedupeSet(`q:${chatId}:${key}`, String(Date.now()));
     if (seenEvents.size > 200) seenEvents.clear();
-  } else if (fresh) {
-    await feishuSend(env, chatId, `❌ 触发分析任务失败：${dispatched.detail}`);
+  } else {
+    // 派发失败：撤掉消息占位，让下一轮（或另一个实例）还能重试
+    if (msgKey) await dedupeDel(`msg:${msgKey}`);
+    if (fresh) {
+      await feishuSend(env, chatId, `❌ 触发分析任务失败：${dispatched.detail}`);
+    }
   }
   return { ok: dispatched.ok, skipped: "", receipt, dispatch: dispatched };
 }
@@ -750,7 +834,13 @@ async function pollFeishu(env) {
       if (v.skip || seen || !id) continue;
 
       try {
-        const r = await handleQuery(env, v.codes, chatId);
+        const r = await handleQuery(env, v.codes, chatId, id);
+        if (r.skipped === "duplicate") {
+          // 另一个实例已经处理过这条（冷启动时本实例看不见），这里一声都不出
+          pollSeen.set(id, Date.now());
+          report.push(`      ↳ 已被别的实例处理过，本次跳过（跨实例去重生效）`);
+          continue;
+        }
         if (r.ok) {
           pollSeen.set(id, Date.now());
           handled += 1;

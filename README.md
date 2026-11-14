@@ -240,7 +240,7 @@ BIGA_SOURCE_EASTMONEY=0 BIGA_SOURCE_SINA=0 python check_sources.py  # 多级演�
 | `evening-news.yml` | 晚间新闻 | 每天 22:00 |
 | `keep-alive.yml` | 保持仓库活跃 | 每周二 01:00 |
 | `check-sources.yml` | 数据源健康自检（只读） | 每周一 09:00，也可手动运行 |
-| `stock-query.yml` | 个股深度分析（查任意股 → 策略信号 + 买入建议 → 推飞书图片卡片：K 线 MA5/10/20/60 + 12 项指标 + 结论） | 仅手动 |
+| `stock-query.yml` | 个股深度分析（查任意股 → 策略信号 + 买入建议 → 推飞书图片卡片：K 线 MA5/10/20/60 + 16 项指标 + 筹码分布 + 结论） | 仅手动 |
 | `verify-valuation.yml` | 真实数据取自检（估值/资金流/行情/指标，只打日志不推送） | 仅手动 |
 
 所有流水线都配置了最小权限 `permissions: contents: read`、

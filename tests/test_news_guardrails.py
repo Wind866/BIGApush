@@ -184,6 +184,31 @@ class TestNewsFreshness(unittest.TestCase):
         self.assertEqual(sum(1 for line in lines if line.startswith("  • ")), 2)
         self.assertIn("[11-15 16:27]", text, "卡片必须标出每条新闻的发布时间")
 
+    def test_long_intro_is_clipped_with_ellipsis(self):
+        """截断必须补省略号。
+
+        新浪的 intro 由上游截好并自带 "..."，但同花顺兜底源的 digest 常见
+        110~270 字，旧实现直接 [:110] 硬切，行尾连省略号都没有，读者分不清
+        是消息发一半断了还是原文到此结束。
+        """
+        from utils import biga_sources as bs
+
+        lines = bs._news_lines(
+            [("长摘要稿", "要" * 300, self.NOW - 60)], count=1, now_ts=self.NOW)
+        body = lines[1].strip()
+        self.assertTrue(body.endswith("…"), body[-10:])
+        self.assertLessEqual(len(body), bs.NEWS_INTRO_MAX)
+
+        # 未超长的摘要原样保留，不画蛇添足
+        lines = bs._news_lines(
+            [("短摘要稿", "新浪给的完整句子。", self.NOW - 60)], count=1, now_ts=self.NOW)
+        self.assertEqual(lines[1].strip(), "新浪给的完整句子。")
+
+        # 上游已带 "..." 的条目，截断处不叠加成 "...."
+        clipped = bs._clip_intro("新" * 108 + "...")
+        self.assertNotIn("..", clipped)
+        self.assertLessEqual(len(clipped), bs.NEWS_INTRO_MAX)
+
     def test_all_stale_raises_so_provider_can_fall_back(self):
         from utils import biga_sources as bs
 

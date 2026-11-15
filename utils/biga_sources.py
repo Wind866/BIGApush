@@ -528,6 +528,22 @@ BJ_TZ = dt.timezone(dt.timedelta(hours=8))
 # 「今日要闻」。周末新闻量小，有几条推几条即可，不强行凑满 count。
 NEWS_MAX_AGE_HOURS = 24
 
+# 摘要展示上限。新浪的 intro 一般只有 53~104 字（超长的那部分由上游自己截断并
+# 补 "..."），但同花顺兜底源的 digest 常见 110~270 字。直接切片会让行尾戛然而止、
+# 连省略号都没有，读者分不清是消息发到一半断了、还是原文就到这里。
+NEWS_INTRO_MAX = 110
+
+
+def _clip_intro(text: str, limit: int = NEWS_INTRO_MAX) -> str:
+    """压缩空白后截断摘要，超长补省略号；上游自带省略号的不重复叠加。"""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    if cut.endswith("…"):
+        return cut
+    return cut.rstrip("，,、；;：: .") + "…"
+
 
 def _news_timestamp(item: dict) -> int | None:
     """从各源字段里取发布时间（Unix 秒）；解析不了返回 None。
@@ -585,7 +601,7 @@ def _news_lines(items: list[tuple[str, str, int | None]], count: int,
         if ts is not None:
             stamp = f" [{dt.datetime.fromtimestamp(ts, BJ_TZ):%m-%d %H:%M}]"
         lines.append(f"  • {title}{stamp}")
-        intro = re.sub(r"\s+", " ", (intro or "").strip())[:110]
+        intro = _clip_intro(intro)
         if intro:
             lines.append(f"    {intro}")
     if not lines:

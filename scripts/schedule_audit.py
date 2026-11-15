@@ -119,7 +119,16 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
             try:
                 info = api_get(f"/repos/{full_repo}/actions/workflows/{workflow}", token)
                 wid = info["id"]
-                runs = api_get(f"/repos/{full_repo}/actions/runs?per_page=100", token)["workflow_runs"]
+                # 按「日期 + 具体 workflow」精确查询。旧版拉仓库级最近 100 条再按
+                # workflow_id 过滤：本仓库 10 个工作流每天触发多次，100 条只够覆盖
+                # 一两天；跨天对账时前一日 08:43 的记录早被挤出列表，会被误报成
+                # 「❌ 未到」并触发一条假的漏跑告警。
+                # 查询上限放到次日，是为了容纳晚间档最长 +10 小时的跨日延迟。
+                next_day = (datetime.fromisoformat(day).date() + timedelta(days=1)).isoformat()
+                runs = api_get(
+                    f"/repos/{full_repo}/actions/workflows/{workflow}/runs"
+                    f"?created={day}..{next_day}&per_page=100", token,
+                )["workflow_runs"]
             except Exception as exc:  # noqa: BLE001 - 查询失败不等于任务失败
                 row["status"] = "⬜ 未覆盖"
                 row["note"] = f"API 查询失败：{str(exc)[:80]}"
@@ -168,6 +177,8 @@ def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
         "",
         f"- 当日应到：**{expected}** 个目标 · 可核对：**{covered}** 个",
         f"- 实到：**{arrived}** · 未到：**{missing}**",
+        f"- 未覆盖：**{sum(1 for r in rows if r['status'].startswith('⬜') and r['due'])}** 个档期"
+        "（缺 `AUDIT_PAT` 或私有仓库无权限）—— **这些档期的漏跑本次根本不会被发现**",
         "- 档期表来源：`cloudflare/worker.js` 的 `PLAN`；「⬜ 未覆盖」表示缺 `AUDIT_PAT`，不代表任务没跑",
         "",
         "| 档期 | 任务 | 目标 | 实到 | 偏差 | 结论 |",
@@ -188,12 +199,27 @@ def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
     return "\n".join(lines)
 
 
+def default_audit_day() -> str:
+    """返回「刚过去的那个完整日」（北京时间）。
+
+    归档 cron 是北京 23:30，但本账号 GitHub schedule 实测延迟 3~10 小时。
+    一旦凌晨才真正跑起来，datetime.now(BJ).date() 已经是新的一天，脚本会把
+    前一天所有档期标成「⏳ 未到时刻」，前一天的漏跑就永远没人核对 ——
+    监控任务自己被调度延迟打瞎。因此中午 12 点之前一律回看前一天。
+    手动 --date / AUDIT_DATE 优先，便于补对历史日期。
+    """
+    now = datetime.now(BJ)
+    if now.hour < 12:
+        return (now.date() - timedelta(days=1)).isoformat()
+    return now.date().isoformat()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="当日档期应到/实到对账")
     ap.add_argument("--date", default=os.getenv("AUDIT_DATE", ""),
-                    help="北京时间日期 YYYY-MM-DD，默认今天")
+                    help="北京时间日期 YYYY-MM-DD，默认回看刚过去的完整日")
     args = ap.parse_args()
-    day = args.date or datetime.now(BJ).date().isoformat()
+    day = args.date or default_audit_day()
 
     rows, covered, expected = build_rows(day)
     report = render(rows, day, expected, covered)
@@ -212,7 +238,8 @@ def main() -> int:
     missing = sum(1 for r in rows if r["status"].startswith("❌"))
     uncovered = sum(1 for r in rows if r["status"].startswith("⬜") and r["due"])
     if uncovered:
-        print(f"::warning::{uncovered} 个当日档期未能核对（缺 AUDIT_PAT），请补配后重跑")
+        print(f"::warning::{uncovered} 个当日档期未能核对（缺 AUDIT_PAT / 私有仓库无权限）。"
+              "这部分档期即使漏跑也不会被本次对账发现，请补配 PAT 后重跑。")
     if missing:
         print(f"::error::{missing} 个当日应到档期没有任何触发记录")
         return 1

@@ -19,6 +19,8 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # 逐项探测多个外部接口；不设上限时 job 会吃掉默认的 360 分钟额度。
+    timeout-minutes: 15
     env:
       TZ: Asia/Shanghai
     steps:

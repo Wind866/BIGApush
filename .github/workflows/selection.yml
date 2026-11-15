@@ -32,7 +32,12 @@ env:
 jobs:
   run-selection:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 必须大于两个 step 上限之和（55 + 75 = 130），留 20 分钟给安装依赖与收尾。
+    # 旧值 90 会让 job 先于 step 超时被整体取消：GitHub 取消 job 时不执行
+    # if: failure() 的告警步骤，也不执行 actions/cache 的 post 保存步骤 ——
+    # 于是当天既没有推送、没有告警，数据库缓存也丢了，次日又从零全量抓取。
+    # 现在让 step 级超时先触发（属于 failure，告警与缓存保存都会执行）。
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -128,4 +133,19 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           python scripts/alert.py "⚠️ 收盘选股任务运行失败，请查看日志" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"
+
+      # job 被整体取消（如 Actions 平台级超时 / 手动 cancel）时，GitHub 不会执行
+      # if: failure() 的步骤，上面那条告警会静默哑掉。用 always() 兜住这条路径。
+      - name: 超时 / 取消兜底告警
+        if: always() && job.status == 'cancelled'
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/alert.py "⚠️ 收盘选股 job 被取消或超时（failure() 告警不会触发）" --run-url "$RUN_URL" \
             || echo "::error::告警发送失败（独立告警通道可能也失效）"

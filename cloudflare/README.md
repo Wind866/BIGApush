@@ -108,15 +108,65 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=22:13&key=<TOKEN>  手
 打完去 Actions 看日志：出现 `⏭ 跳过本次推送：档期 ... 已在 ... 推送成功` 说明
 幂等守卫生效；想真的再推一次，在 Actions 手动 Run workflow 勾 `force`。
 
-### 6. 核对线上版本（重要）
+### 6. 核对线上版本 / 确认部署成功（重要）
 
-`/health` 会返回 `build` 字段，例如 `"build": "2026-11-14.1"`。**每次改完 `worker.js`
-都要重新 Deploy，并用这个字段确认线上跑的就是仓库里这一版**。曾经出现过线上版本
-与仓库不同步：线上没有 `/test` 路由、档期名也不一致，导致自测请求被当成根路径处理，
-排查时极易误判成「Worker 挂了」。
+> **GitHub 仓库 main 更新 ≠ Worker 已部署。** 两件事完全独立：改仓库只是改源码，
+> 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
-同时确认 Settings → Triggers 里 Cron expression 是 `* * * * *`（面板显示 `Every minute`）。
-`/health` 只能证明 Worker 已部署，**证明不了定时触发器已生效**。
+`/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
+当前这一版是 `"build": "2026-11-15.1"`，且响应里应有 `alertSignSupported: true`
+（旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
+没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
+不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
+
+**① 一次 `/health` 看清版本与 Secrets（只读，无副作用）**
+
+```bash
+curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | python -m json.tool
+```
+
+| 字段 | 期望 | 不对时怎么办 |
+| --- | --- | --- |
+| `build` | `2026-11-15.1` | 线上不是这版 → 重新 deploy |
+| `alertSignSupported` | `true` | 旧代码（本版新增字段） |
+| `tokenValid` | `true` | `GH_TOKEN` 过期或没勾三仓库 Actions 权限 |
+| `alertConfigured` | `true` | 没配 `ALERT_WEBHOOK`，告警只留在 Worker 日志 |
+| `alertSecretConfigured` | `true` | 机器人开了加签却没配 `ALERT_SECRET` → 飞书 19021 拒收 |
+| `adminToken` | `true` | 运维端点全部 503（安全默认，但没法手动自测） |
+| `slots` / `targets` | 档期数 / 目标数 | 档期表是不是你要的那份 |
+
+`*.workers.dev` 在国内多数网络访问不通，换自定义域名或换网络；Dashboard 的
+Workers → **…** → View logs 也能看到响应。`?check=1` 会顺带请求 GitHub `/user` 校验 token，
+仍然是只读的。
+
+**② 确认「部署动作」真的发生过**
+
+```bash
+cd cloudflare
+npx wrangler deploy                                            # 重新部署
+npx wrangler deployments list --name gh-actions-scheduler       # 部署历史 / version ID / 时间
+npx wrangler secret list --name gh-actions-scheduler            # 只列密钥名，不显示值
+npx wrangler tail --name gh-actions-scheduler                   # 实时日志
+```
+
+需要先 `npx wrangler login` 或设置 `CLOUDFLARE_API_TOKEN`。不用 CLI 就走 Dashboard：
+**Workers & Pages → gh-actions-scheduler → Deployments** 看最新一条时间与 version ID，
+再开 **Logs → Begin log stream** 观察每分钟唤醒。
+
+**③ 确认定时触发器与功能（有副作用，别当日常探活）**
+
+- Settings → Triggers 的 Cron expression 必须是 `* * * * *`（面板显示 `Every minute`）。
+  `/health` 只能证明 Worker 已部署，**证明不了触发器生效**。
+- `GET /test?at=22:13&key=<ADMIN_TOKEN>` 会触发一次真实 `workflow_dispatch`，
+  打完去 GitHub Actions 看有没有新增运行，并在 `wrangler tail` 里看 `[ALERT] 告警已发送`。
+  它会消耗 Actions 额度、可能往群里推消息，日常只看 `/health` 即可。
+
+**④ 三个最常见的「以为部署了其实没有」**
+
+1. 只合并了 GitHub 的 PR，没有单独 deploy。
+2. 部署到了旧 Worker `biga-push-cron`，不是 `gh-actions-scheduler`（那样晚间档还会被触发两次）。
+3. 代码是新版但漏配 `ALERT_SECRET`：`/health` 显示 `alertSecretConfigured: false`，
+   告警依旧被飞书 19021 拒掉，看起来像「告警没触发」。
 
 ### 7. 两个可靠性修复（2026-11-14）
 

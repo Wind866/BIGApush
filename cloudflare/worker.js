@@ -57,7 +57,9 @@ const API = "https://api.github.com";
 // 每次改动 worker.js 都递增这个标识。/health 会把它暴露出来，
 // 用于核对「Cloudflare 线上跑的是不是仓库里这一版」——此前线上版本与仓库
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
-const BUILD = "2026-11-14.10";
+// 2026-11-15.1：notify() 支持飞书加签 + 校验业务码（19021），/health 增加
+// alertSignSupported / alertSecretConfigured，便于一次确认线上是否为新版。
+const BUILD = "2026-11-15.1";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -1199,11 +1201,15 @@ export default {
         tokenValid,
         tokenScopes,
         alertConfigured: Boolean((env.ALERT_WEBHOOK || "").trim()),
+        // 本版代码是否已带加签能力（旧版没有这两个字段）；
+        // 密钥没配且机器人开了加签时，告警仍会被 19021 拒掉。
+        alertSignSupported: true,
+        alertSecretConfigured: Boolean((env.ALERT_SECRET || "").trim()),
         // 运维端点是否已上锁；false 表示 /test、/feishu/* 全部返回 503（安全默认）
         adminToken: Boolean((env.ADMIN_TOKEN || "").trim()),
         feishuApp: Boolean((env.FEISHU_APP_ID || "").trim()),
         feishuPollEveryMin: POLL_EVERY_MIN,
-        note: "根路径不会触发任务；/test?at=HH:MM&key=… 手动测某档期，/health?check=1 校验 token；build 字段用于核对线上是否为此版代码",
+        note: "根路径不会触发任务；/test?at=HH:MM&key=… 手动测某档期，/health?check=1 校验 token；build 与 alertSignSupported 用于核对线上是否为此版代码",
       });
     }
 

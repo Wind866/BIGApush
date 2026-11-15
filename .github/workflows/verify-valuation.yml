@@ -63,7 +63,7 @@ jobs:
           from stock_analyzer import real_fundamentals as rf
 
           codes = [c.strip() for c in os.environ.get("STOCK_CODES", "").split(',') if c.strip()]
-          all_ok = True
+          ok_cnt = 0
           for code in codes:
               val = rf.get_real_valuation(code)
               has_pe = val.get('pe') is not None
@@ -71,10 +71,14 @@ jobs:
               has_pb = val.get('pb') is not None
               has_mc = val.get('market_cap') is not None
               status = 'OK' if (has_pe and has_ps and has_pb and has_mc) else 'PARTIAL/EMPTY'
-              if not (has_pe and has_ps):
-                  all_ok = False
+              if has_pe and has_ps:
+                  ok_cnt += 1
               print(f"[{status}] {code}: {json.dumps(val, ensure_ascii=False, default=str)}")
-          print("RESULT:", "ALL_REAL_PE_PS" if all_ok else "PE_OR_PS_MISSING")
+          print("RESULT:", "ALL_REAL_PE_PS" if ok_cnt == len(codes) else f"PARTIAL {ok_cnt}/{len(codes)}")
+          # 门禁：PE/PS 是估值核心字段；数据中心 IP 下个别接口本就可能被拦，
+          # 不要求 100%，但过半取不到即判上游数据源失效（真断言，取代原先只 print）。
+          if ok_cnt * 2 < len(codes):
+              sys.exit(f"FAIL: 仅 {ok_cnt}/{len(codes)} 只标的取到 PE+PS 真值，估值数据源不可用")
           PY
 
       - name: 资金流 + 行情兜底验证
@@ -102,6 +106,8 @@ jobs:
               print(f"[Q ] {code}: rows={rows}")
           print("RESULT_FF:", f"{ff_ok}/{len(codes)} 有资金流")
           print("RESULT_Q :", f"{q_ok}/{len(codes)} 有行情")
+          if ff_ok == 0 or q_ok == 0:
+              sys.exit(f"FAIL: 资金流 {ff_ok}/{len(codes)}、行情 {q_ok}/{len(codes)} —— 存在完全取不到的通道")
           PY
 
       - name: 基础信息(名称/行业) + 长周期行情(MA200) 验证
@@ -134,6 +140,8 @@ jobs:
           print("RESULT_INFO :", f"{info_ok}/{len(codes)} 名称行业齐全")
           print("RESULT_MA200:", f"{bars_ok}/{len(codes)} 行情≥200根")
           print("RESULT_TREND:", f"{trend_ok}/{len(codes)} 趋势已判定")
+          if info_ok == 0 or bars_ok == 0 or trend_ok == 0:
+              sys.exit(f"FAIL: 名称行业 {info_ok}、行情≥200根 {bars_ok}、趋势 {trend_ok}（共 {len(codes)}）—— 有通道完全失效")
           PY
 
       - name: 技术指标真实值(MACD/KDJ/BOLL/RSI) 验证
@@ -165,6 +173,8 @@ jobs:
               print(f"[IND] {code}: {json.dumps(ind, ensure_ascii=False)} "
                     f"detail={json.dumps(detail, ensure_ascii=False)} ok={good}")
           print("RESULT_IND :", f"{ok}/{len(codes)} 指标为真实计算值")
+          if ok == 0:
+              sys.exit(f"FAIL: 0/{len(codes)} 标的指标为真实计算值，技术指标通道完全失效")
           PY
 
       # 2026-11-14 修复专项：三处「云端必然踩到」的问题在 runner 上一次性验完
@@ -213,4 +223,17 @@ jobs:
                   if '2e8' in code:
                       hits.append(f'{path}:{lineno}')
           print("RESULT_FAKECAP:", "CLEAN" if not hits else f"LEFT {hits}")
+          failures = []
+          if not ok_cfg:
+              failures.append("配置路径导入失败")
+          if not ok_ind:
+              failures.append("行业板块无数据")
+          if not ok_con:
+              failures.append("概念板块无数据或显式报缺")
+          if not ok_cap:
+              failures.append("市值口径非元量级")
+          if hits:
+              failures.append(f"假市值兜底残留 {hits}")
+          if failures:
+              sys.exit("FAIL: " + "; ".join(failures))
           PY

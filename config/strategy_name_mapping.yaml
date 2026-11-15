@@ -4,7 +4,6 @@
 
 strategy_names:
   # 选股策略
-  ContinuousRisingWithVolumeStrategyV2: 连阳回调策略
   ResistanceBreakoutStrategy: 阻力位突破策略
   TrendAccelerationInflectionStrategy: 趋势加速拐点
   MorningStarStrategy: 启明星策略
@@ -17,7 +16,6 @@ strategy_names:
   TrendResonanceReversalStrategy: 趋势共振反转策略
   WBottomStrategy: W底策略
   ImmortalGuidanceStrategy: 仙人指路策略
-  MA20MA60Strategy: 520560策略
   Strategy2560Selection: 2560战法选股策略
   TrendStartStrategy: 趋势起点策略
   GoldenTriangleStrategy: 金三角策略
@@ -26,7 +24,6 @@ strategy_names:
 # 反向映射（中文名称到英文类名）
 # 自动生成，不需要手动维护
 reverse_mapping:
-  连阳回调策略: ContinuousRisingWithVolumeStrategyV2
   阻力位突破策略: ResistanceBreakoutStrategy
   趋势加速拐点: TrendAccelerationInflectionStrategy
   启明星策略: MorningStarStrategy
@@ -39,7 +36,6 @@ reverse_mapping:
   趋势共振反转策略: TrendResonanceReversalStrategy
   W底策略: WBottomStrategy
   仙人指路策略: ImmortalGuidanceStrategy
-  520560策略: MA20MA60Strategy
   2560战法选股策略: Strategy2560Selection
   趋势起点策略: TrendStartStrategy
   金三角策略: GoldenTriangleStrategy

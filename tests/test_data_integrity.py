@@ -245,9 +245,9 @@ class TestCallSitesPassSlotHour(unittest.TestCase):
     """光改 push_guard 不够：调用方必须真的把目标档期小时传进去。"""
 
     CASES = [
-        ("evening_news.py", 22),
+        ("evening_news.py", 21),
         ("daily_news.py", 8),
-        ("intraday_selection.py", 13),
+        ("intraday_selection.py", 12),
     ]
 
     def test_slot_hour_wired(self):

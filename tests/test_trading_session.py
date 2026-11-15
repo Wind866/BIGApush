@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """交易日判定的回归测试（标准库 unittest，无需第三方依赖、不联网）。
 
-重点是「跨午夜补跑」这条路径：15:43 的收盘定稿档被调度延迟拖到次日凌晨时，
+重点是「跨午夜补跑」这条路径：19:33 的收盘定稿档被调度延迟拖到次日凌晨时，
 旧实现只看 `行情日期 == 今天`，一律判成非交易日静默退出，当天定稿永久丢失。
 这里把时间与行情时间戳都注入成固定值，锁定行为。
 """
@@ -38,7 +38,7 @@ class TradingSessionTest(unittest.TestCase):
         return isel.trading_session(now=now, allow_catchup=allow_catchup)
 
     def test_intraday_same_day_passes(self):
-        # 2026-11-16 周一 13:13，行情时间戳是当天
+        # 2026-11-16 周一 12:53，行情时间戳是当天
         ok, _reason, data_date = self._run(
             datetime(2026, 11, 16, 13, 13, tzinfo=BJ), _ts(2026, 11, 16, 13, 10))
         self.assertTrue(ok)
@@ -52,7 +52,7 @@ class TradingSessionTest(unittest.TestCase):
         self.assertIn("非交易日", reason)
 
     def test_close_catchup_after_midnight_runs(self):
-        # 15:43 收盘档拖到次日 01:26：按上一交易日补跑，数据日期=行情日期
+        # 19:33 收盘档拖到次日 01:26：按上一交易日补跑，数据日期=行情日期
         ok, reason, data_date = self._run(
             datetime(2026, 11, 17, 1, 26, tzinfo=BJ), _ts(2026, 11, 16, 15, 0),
             allow_catchup=True)

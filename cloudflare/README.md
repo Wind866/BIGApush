@@ -21,19 +21,19 @@ GitHub cron   延迟数小时 ─┘        ↑
 
 | 北京时间 | 目标 |
 | --- | --- |
-| 08:43 每天 | BIGApush / 早间新闻 |
-| 13:07 工作日 | limit-up-relay / 盘中快照 |
-| 13:13 工作日 | BIGApush / 盘中选股 |
-| 15:37 工作日 | limit-up-relay / 收盘定稿 |
-| 15:43 工作日 | BIGApush / 收盘选股 |
-| 20:00 工作日 | etf-feishu-push / ETF 资金流向 |
-| 22:13 每天 | BIGApush / 晚间新闻 |
-| 23:30 每天 | BIGApush / 当日档期对账（应到 · 实到） |
-| 周一 09:00 | BIGApush + limit-up-relay / 数据源自检 |
-| 周二 01:00 | BIGApush / Keep Alive |
+| 08:13 每天 | BIGApush / 早间新闻 |
+| 12:33 工作日 | limit-up-relay / 盘中快照 |
+| 12:53 工作日 | BIGApush / 盘中选股 |
+| 18:53 工作日 | limit-up-relay / 收盘定稿 |
+| 19:33 工作日 | BIGApush / 收盘选股 |
+| 20:03 工作日 | etf-feishu-push / ETF 资金流向 |
+| 21:53 每天 | BIGApush / 晚间新闻 |
+| 22:33 每天 | BIGApush / 当日档期对账（应到 · 实到） |
+| 周一 07:13 | BIGApush + limit-up-relay / 数据源自检 |
+| 周二 01:03 | BIGApush / Keep Alive |
 
-> **13:07 与 15:37 共用 `limit-up-relay/daily.yml`**：Worker 会通过
-> `SLOT_INPUTS` 显式传入 `expect_hhmm`（`1307` / `1537`）。不要删掉它 ——
+> **12:33 与 18:53 共用 `limit-up-relay/daily.yml`**：Worker 会通过
+> `SLOT_INPUTS` 显式传入 `expect_hhmm`（`1233` / `1853`）。不要删掉它 ——
 > 少了这个输入，workflow 只能按运行时刻猜档期，Actions 排队一久就会把盘中快照
 > 记成收盘档，台账随后把真正的收盘定稿判重跳过（静默漏推）。
 
@@ -96,7 +96,7 @@ npx wrangler secret put ADMIN_TOKEN   # 随便生成一个长随机串，例如 
 ### 4. ⚠️ 删掉旧的触发器
 
 如果之前部署过只管晚间新闻的 `biga-push-cron`（cron `13 14 * * *`），
-**必须先删除它的 cron 或整个 Worker**，否则 22:13 会被两个 Worker 各触发一次。
+**必须先删除它的 cron 或整个 Worker**，否则晚间档会被两个 Worker 各触发一次（旧 Worker 定在 22:13）。
 免费账号总共只有 5 个 cron 额度，也别浪费。
 
 ### 5. 自测
@@ -104,11 +104,11 @@ npx wrangler secret put ADMIN_TOKEN   # 随便生成一个长随机串，例如 
 ```
 https://gh-actions-scheduler.<子域>.workers.dev/health                    查看档期表与配置（只读，无需密钥）
 https://gh-actions-scheduler.<子域>.workers.dev/health?check=1             校验 GH_TOKEN
-https://gh-actions-scheduler.<子域>.workers.dev/test?at=22:13&key=<TOKEN>  手动打一发指定档期
+https://gh-actions-scheduler.<子域>.workers.dev/test?at=21:53&key=<TOKEN>  手动打一发指定档期
 ```
 
 `/health` 会显示 `adminToken: true/false`，一眼看出运维端点是否已上锁。
-密钥也可以放在请求头里：`curl -H "X-Admin-Token: <TOKEN>" .../test?at=22:13`。
+密钥也可以放在请求头里：`curl -H "X-Admin-Token: <TOKEN>" .../test?at=21:53`。
 
 根路径**不会**触发任何任务（旧版一打开就全量触发，已修正）。
 打完去 Actions 看日志：出现 `⏭ 跳过本次推送：档期 ... 已在 ... 推送成功` 说明
@@ -120,7 +120,7 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=22:13&key=<TOKEN>  手
 > 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
 `/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
-当前这一版是 `"build": "2026-11-15.2"`，且响应里应有 `alertSignSupported: true`
+当前这一版是 `"build": "2026-11-15.3"`，且响应里应有 `alertSignSupported: true`
 （旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
 没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
 不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
@@ -133,7 +133,7 @@ curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | py
 
 | 字段 | 期望 | 不对时怎么办 |
 | --- | --- | --- |
-| `build` | `2026-11-15.2` | 线上不是这版 → 重新 deploy |
+| `build` | `2026-11-15.3` | 线上不是这版 → 重新 deploy |
 | `alertSignSupported` | `true` | 旧代码（本版新增字段） |
 | `tokenValid` | `true` | `GH_TOKEN` 过期或没勾三仓库 Actions 权限 |
 | `alertConfigured` | `true` | 没配 `ALERT_WEBHOOK`，告警只留在 Worker 日志 |
@@ -163,7 +163,7 @@ npx wrangler tail --name gh-actions-scheduler                   # 实时日志
 
 - Settings → Triggers 的 Cron expression 必须是 `* * * * *`（面板显示 `Every minute`）。
   `/health` 只能证明 Worker 已部署，**证明不了触发器生效**。
-- `GET /test?at=22:13&key=<ADMIN_TOKEN>` 会触发一次真实 `workflow_dispatch`，
+- `GET /test?at=21:53&key=<ADMIN_TOKEN>` 会触发一次真实 `workflow_dispatch`，
   打完去 GitHub Actions 看有没有新增运行，并在 `wrangler tail` 里看 `[ALERT] 告警已发送`。
   它会消耗 Actions 额度、可能往群里推消息，日常只看 `/health` 即可。
 
@@ -186,8 +186,8 @@ npx wrangler tail --name gh-actions-scheduler                   # 实时日志
 
 ### 8. 每日自动对账
 
-`scripts/schedule_audit.py` + `.github/workflows/schedule-audit.yml` 每天北京 23:30
-把「当日 9 档期应到 / 实到 / 延迟分钟」生成成 Markdown，写进 Step Summary 并上传
+`scripts/schedule_audit.py` + `.github/workflows/schedule-audit.yml` 每天北京 22:33
+把「当日各档期应到 / 实到 / 延迟分钟」生成成 Markdown，写进 Step Summary 并上传
 artifact；发现已覆盖范围内有漏跑就让任务失败、走告警。
 
 内置 `GITHUB_TOKEN` 只能读本仓库，要核对另外两个仓库（尤其私有的 `etf-feishu-push`）
@@ -364,7 +364,7 @@ curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里�
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-15.2，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-15.3，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 
@@ -409,7 +409,7 @@ PAT 的到期时间；Worker 会在到期前 7 天起每天告警）、`build` �
   Worker 一旦失效就完全没有兜底。
 - 三个仓库的 `workflow_dispatch` 触发需要 PAT 具备对应仓库的
   `Actions: Read and write`；`etf-feishu-push` 是**私有仓库**，PAT 的
-  Repository access 必须包含它，否则 20:00 档期会一直 404。
+  Repository access 必须包含它，否则 20:03 档期会一直 404。
 - 推送脚本都靠台账按档期判重，兜底 cron 可以多铺几档：重复触发会被秒级跳过，
   不会刷屏；但 `etf-feishu-push` 用的是「同数据日期 + N 小时」时间窗口，
   加兜底档位前要先确认 `config.SKIP_WINDOW_HOURS` 覆盖得到，否则会重复推送。

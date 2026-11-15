@@ -45,7 +45,7 @@
  * 部署前必读
  * ----------
  * 1. 如果之前部署过旧的 biga-push-cron（晚间新闻专用），请先删掉它的 cron 或整个 Worker，
- *    否则 22:13 会被两个 Worker 各触发一次。
+ *    否则晚间档会被两个 Worker 各触发一次（旧 Worker 定在 22:13）。
  * 2. 本 Worker 只负责「准点触发」，不保证「不重复推送」。重复触发的去重由各仓库脚本侧的
  *    幂等守卫负责（BIGApush 已有 utils/push_guard.py，其余仓库需同步接入）。
  * 3. 仓库侧需要同步改动：给所有 workflow 加 actions: read 权限、给推送脚本接幂等守卫、
@@ -61,58 +61,62 @@ const API = "https://api.github.com";
 // alertSignSupported / alertSecretConfigured，便于一次确认线上是否为新版。
 // 2026-11-15.2：PLAN 增加 23:30 档期对账；双档 workflow 显式传 expect_hhmm；
 // GH_TOKEN 到期前 7 天开始预警；/health 暴露 tokenExpiration。
-const BUILD = "2026-11-15.2";
+// 2026-11-15.3：整表换成新时间表 —— 早间 08:13 / 盘中快照 12:33 / 盘中选股 12:53 /
+// 收盘定稿 18:53 / 收盘选股 19:33 / ETF 20:03 / 晚间 21:53 / 对账 22:33 /
+// 周一自检 07:13 / 周二 Keep Alive 01:03。仓库侧 cron、EXPECT_HHMM 与各脚本的
+// slot_hour 已同步改过：只改这里不改仓库侧，兜底 cron 会算错档期。
+const BUILD = "2026-11-15.3";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
 const PLAN = [
   {
-    at: "08:43", days: "all", name: "早间新闻",
+    at: "08:13", days: "all", name: "早间新闻",
     targets: ["BIGApush/morning-news.yml"],
   },
   {
-    at: "13:07", days: "weekday", name: "涨停接力 · 盘中快照",
+    at: "12:33", days: "weekday", name: "涨停接力 · 盘中快照",
     targets: ["limit-up-relay/daily.yml"],
   },
   {
-    at: "13:13", days: "weekday", name: "盘中选股",
+    at: "12:53", days: "weekday", name: "盘中选股",
     targets: ["BIGApush/intraday-selection.yml"],
   },
   {
-    at: "15:37", days: "weekday", name: "涨停接力 · 收盘定稿",
+    at: "18:53", days: "weekday", name: "涨停接力 · 收盘定稿",
     targets: ["limit-up-relay/daily.yml"],
   },
   {
-    at: "15:43", days: "weekday", name: "收盘选股",
+    at: "19:33", days: "weekday", name: "收盘选股",
     targets: ["BIGApush/selection.yml"],
   },
   {
-    at: "20:00", days: "weekday", name: "ETF 资金流向",
+    at: "20:03", days: "weekday", name: "ETF 资金流向",
     targets: ["etf-feishu-push/daily-push.yml"],
   },
   {
-    at: "22:13", days: "all", name: "晚间新闻",
+    at: "21:53", days: "all", name: "晚间新闻",
     targets: ["BIGApush/evening-news.yml"],
   },
   {
     // 对账本身也曾只靠 GitHub cron：延迟到次日就对错了日期，等于监控自己被打瞎。
     // 交给 Worker 准点触发，脚本里仍保留「12 点前回看前一天」的兜底。
-    at: "23:30", days: "all", name: "档期对账 · 应到/实到",
+    at: "22:33", days: "all", name: "档期对账 · 应到/实到",
     targets: ["BIGApush/schedule-audit.yml"],
   },
   {
-    at: "09:00", days: 1, name: "数据源健康自检（周一）",
+    at: "07:13", days: 1, name: "数据源健康自检（周一）",
     targets: ["BIGApush/check-sources.yml", "limit-up-relay/check-sources.yml"],
   },
   {
-    at: "01:00", days: 2, name: "Keep Alive（周二）",
+    at: "01:03", days: 2, name: "Keep Alive（周二）",
     targets: ["BIGApush/keep-alive.yml"],
   },
 ];
 
-// 13:07 / 15:37 两个档期共用 limit-up-relay/daily.yml。若不显式带上档期，
+// 12:33 / 18:53 两个档期共用 limit-up-relay/daily.yml。若不显式带上档期，
 // 该 workflow 只能按「实际运行时刻取最接近的档期」猜；Actions 排队一久就会把
-// 13:07 的盘中快照记成 15:37，台账随后把真正的收盘定稿判成重复而跳过。
+// 12:33 的盘中快照记成 18:53，台账随后把真正的收盘定稿判成重复而跳过。
 // 这里按白名单给需要的工作流注入 inputs，其余工作流仍不传（API 会拒绝
 // 未在 workflow 里声明的 input）。
 const SLOT_INPUTS = {
@@ -404,7 +408,7 @@ function timingSafeEqual(a, b) {
  * 运维端点鉴权（/test、/feishu/poll、/feishu/selftest、/feishu 回调）。
  *
  * 这些端点以前完全裸奔：任何人拿到域名就能
- *   - GET /test?at=22:13 触发一次真实推送（消耗 Actions、往群里发消息）
+ *   - GET /test?at=21:53 触发一次真实推送（消耗 Actions、往群里发消息）
  *   - GET /feishu/selftest?send=1 往群里发消息
  *   - GET /feishu/poll 把群里最近消息的**内容**回显到浏览器
  *   - POST /feishu 伪造消息事件（未配 ENCRYPT_KEY 时连签名都没有）
@@ -1066,7 +1070,7 @@ export default {
   async scheduled(event, env, ctx) {
     // 必须用 cron 的计划时刻，不能用 Date.now()：Worker 冷启动 / CF 调度抖动
     // 会让实际执行落进下一分钟，而档期是精确到 HH:MM 的字符串比对，
-    // 一跨分钟就永久错过该档期（08:43 档期无运行记录的根因）。
+    // 一跨分钟就永久错过该档期（08:13 档期无运行记录的根因）。
     const plannedMs = Number(event.scheduledTime) || Date.now();
     const bj = beijingNow(plannedMs);
 
@@ -1251,7 +1255,7 @@ export default {
       });
     }
 
-    // 手动测试指定档期，例如 /test?at=22:13；不会像旧版那样一打开就全量触发
+    // 手动测试指定档期，例如 /test?at=21:53；不会像旧版那样一打开就全量触发
     if (url.pathname === "/test") {
       const at = url.searchParams.get("at") || "";
       const slot = PLAN.find((s) => s.at === at);
@@ -1265,7 +1269,7 @@ export default {
     }
 
     return new Response(
-      "GitHub Actions 统一准点调度器\n\n/health                    查看档期表与配置状态（只读，无需密钥）\n/health?check=1            校验 GH_TOKEN\n\n以下运维端点需要 ADMIN_TOKEN（?key=<token> 或 X-Admin-Token 头）：\n/test?at=22:13             手动触发某个档期（自测用）\n/feishu/poll               立刻轮询一次飞书群消息（群里 @机器人 发股票代码用这个）\n/feishu/selftest           通道自检（?send=1 真往群里发一条）\n/feishu            POST    飞书事件回调用（仅在你有公网域名时才需要）\n",
+      "GitHub Actions 统一准点调度器\n\n/health                    查看档期表与配置状态（只读，无需密钥）\n/health?check=1            校验 GH_TOKEN\n\n以下运维端点需要 ADMIN_TOKEN（?key=<token> 或 X-Admin-Token 头）：\n/test?at=21:53             手动触发某个档期（自测用）\n/feishu/poll               立刻轮询一次飞书群消息（群里 @机器人 发股票代码用这个）\n/feishu/selftest           通道自检（?send=1 真往群里发一条）\n/feishu            POST    飞书事件回调用（仅在你有公网域名时才需要）\n",
       { headers: { "content-type": "text/plain; charset=utf-8" } },
     );
   },

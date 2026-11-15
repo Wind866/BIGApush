@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-盘中选股观察池（北京时间 13:13）
+盘中选股观察池（北京时间 12:53）
 
 设计目标：
 1. 独立于主程序 main.py —— 不依赖 akshare / 数据库 / 首次全量初始化，
@@ -40,9 +40,9 @@ from utils.push_guard import mark_pushed, should_skip  # noqa: E402
 
 WORKFLOW_FILE = "intraday-selection.yml"
 EDITION_CUTOFF_HOUR = 12
-# 目标档期整点（13:13 档）。按「运行时刻 − 13h」归并：当天下午迟到的运行仍算当天，
+# 目标档期整点（12:53 档）。按「运行时刻 − 12h」归并：当天下午迟到的运行仍算当天，
 # 不会把次日档期提前占用。
-EDITION_SLOT_HOUR = 13
+EDITION_SLOT_HOUR = 12
 
 MIN_PCT = 3.0        # 只扫描涨幅 >= 3% 的强势股
 SCAN_FLOOR = 2.0     # 分页扫描到涨幅低于该值即停止
@@ -103,7 +103,7 @@ def trading_session(now: datetime | None = None,
     返回 (是否继续, 说明, 数据日期 YYYY-MM-DD 或 None)。
 
     要点是区分「运行日期」和「数据日期」。旧实现只比较 `行情日期 == 今天`，
-    于是 15:43 的收盘定稿档一旦被 GitHub 拖到次日凌晨（实测延迟 3.3~9.7
+    于是 19:33 的收盘定稿档一旦被 GitHub 拖到次日凌晨（实测延迟 3.3~9.7
     小时），行情日期必然是昨天 → 判成「非交易日」→ 静默退出，当天收盘选股
     永久丢失，深夜兜底档等于白铺。
 
@@ -474,8 +474,8 @@ def build_card(pool: list[dict], overview: dict, quote_ts: int) -> dict:
         {"tag": "div", "text": {"tag": "lark_md", "content": f"**🔥 板块共振**\n{sector_md}"}},
         {"tag": "hr"},
         {"tag": "div", "text": {"tag": "lark_md", "content":
-            "<font color='orange'>⚠️ 这是 13:13 盘中实时快照，午后仍可能变盘；"
-            "以 15:43 收盘选股为定稿信号，本推送不等同于收盘选股结果。</font>"}},
+            "<font color='orange'>⚠️ 这是 12:53 盘中实时快照，午后仍可能变盘；"
+            "以 19:33 收盘选股为定稿信号，本推送不等同于收盘选股结果。</font>"}},
     ]
     if not has_fund:
         extra = ("备用渠道已补到资金拆解，但与东财口径不等价，仅作展示、未计入评分；"
@@ -568,7 +568,7 @@ def card_to_text(pool: list[dict], overview: dict, quote_ts: int) -> str:
         ("板块共振：" + ("、".join(f"{s['name']}{s['count']}只" for s in overview["top_sectors"]) or "无明显共振"))
         if has_fund else f"板块共振：{label} 无可比行业数据，本期跳过",
         "",
-        "⚠️ 盘中实时快照，午后可能变盘；以 15:43 收盘选股为定稿，不等于收盘信号。",
+        "⚠️ 盘中实时快照，午后可能变盘；以 19:33 收盘选股为定稿，不等于收盘信号。",
         ("数据来源：东方财富（多域名容灾）。" if has_fund
          else f"数据来源：{label}（降级源）。")
         + "仅供研究复盘，不构成投资建议。",
@@ -632,7 +632,7 @@ INTRADAY_MAX_LATE_MINUTES = 90   # 超过该值只在卡片上标注时点，不
 
 
 def late_minutes(expect: str) -> int:
-    """EXPECT_HHMM（如 '1307'）与实际北京时间之差；未提供或非法返回 0。"""
+    """EXPECT_HHMM（如 '1853'）与实际北京时间之差；未提供或非法返回 0。"""
     expect = (expect or "").strip()
     if len(expect) != 4 or not expect.isdigit():
         return 0
@@ -643,7 +643,7 @@ def late_minutes(expect: str) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="盘中选股观察池（13:13）")
+    ap = argparse.ArgumentParser(description="盘中选股观察池（12:53）")
     ap.add_argument("--dry-run", action="store_true", help="本地试跑，不推送飞书")
     ap.add_argument("--check-trading-day", action="store_true", help="仅检查交易日并输出给 GitHub Actions")
     ap.add_argument("--catchup", action="store_true",

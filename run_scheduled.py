@@ -50,10 +50,10 @@ class Task:
 
 
 SCHEDULE = (
-    Task("morning_news", "08:43", "早间新闻", ("daily_news.py",), False),
-    Task("intraday", "13:13", "盘中选股观察池", ("intraday_selection.py",), True),
-    Task("close", "15:43", "收盘选股", ("main.py", "run"), True),
-    Task("evening_news", "22:13", "晚间新闻", ("evening_news.py",), False),
+    Task("morning_news", "08:13", "早间新闻", ("daily_news.py",), False),
+    Task("intraday", "12:53", "盘中选股观察池", ("intraday_selection.py",), True),
+    Task("close", "19:33", "收盘选股", ("main.py", "run"), True),
+    Task("evening_news", "21:53", "晚间新闻", ("evening_news.py",), False),
 )
 
 

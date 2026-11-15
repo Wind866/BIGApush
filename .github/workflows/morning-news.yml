@@ -1,21 +1,21 @@
 name: 早间新闻
 
-# 北京时间 = UTC+8，每天 08:43 推送早间要闻（周末也推送财经新闻）。
+# 北京时间 = UTC+8，每天 08:13 推送早间要闻（周末也推送财经新闻）。
 # 准点由 Cloudflare Worker（见 cloudflare/README.md）workflow_dispatch；
 # 下面的 cron 只作兜底 —— GitHub schedule 实测可晚数小时甚至丢弃档期。
 # 两个触发器不会重复推送：daily_news.py 先过 utils/push_guard.py 台账守卫。
 #
-# 兜底窗口按实测延迟铺到 +10 小时（08:43 → 18:43）。原来只铺到 +2 小时，
+# 兜底窗口按实测延迟铺到 +10 小时（08:13 → 18:13）。原来只铺到 +2 小时，
 # 而本账号 schedule 实测延迟 3.3~9.7 小时，真正会跑的时刻根本没有任何 cron
 # 档位，等于 Worker 一失效就彻底漏档。台账按档期判重，多铺的档位不会刷屏。
 on:
   schedule:
-    - cron: '43 0 * * *'    # 北京 08:43 主档
-    - cron: '43 1 * * *'    # 09:43
-    - cron: '43 2 * * *'    # 10:43
-    - cron: '43 4 * * *'    # 12:43  (+4h)
-    - cron: '43 7 * * *'    # 15:43  (+7h)
-    - cron: '43 10 * * *'   # 18:43  (+10h)
+    - cron: '13 0 * * *'    # 北京 08:13 主档
+    - cron: '13 1 * * *'    # 09:13
+    - cron: '13 2 * * *'    # 10:13
+    - cron: '13 4 * * *'    # 12:13  (+4h)
+    - cron: '13 7 * * *'    # 15:13  (+7h)
+    - cron: '13 10 * * *'   # 18:13  (+10h)
   workflow_dispatch:
     inputs:
       force:
@@ -65,13 +65,13 @@ jobs:
           SCHEDULE: ${{ github.event.schedule }}
         run: |
           case "$SCHEDULE" in
-            '43 0 * * *')   planned="0843" ;;
-            '43 1 * * *')   planned="0943" ;;
-            '43 2 * * *')   planned="1043" ;;
-            '43 4 * * *')   planned="1243" ;;
-            '43 7 * * *')   planned="1543" ;;
-            '43 10 * * *')  planned="1843" ;;
-            *)              planned="0843" ;;
+            '13 0 * * *')   planned="0813" ;;
+            '13 1 * * *')   planned="0913" ;;
+            '13 2 * * *')   planned="1013" ;;
+            '13 4 * * *')   planned="1213" ;;
+            '13 7 * * *')   planned="1513" ;;
+            '13 10 * * *')  planned="1813" ;;
+            *)              planned="0813" ;;
           esac
           echo "EXPECT_HHMM=$planned" >> "$GITHUB_ENV"
 

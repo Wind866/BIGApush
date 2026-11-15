@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 每日早间股市新闻推送
-每天 08:43（北京时间）运行，推送财经要闻和上个交易日大盘回顾
+每天 08:13（北京时间）运行，推送财经要闻和上个交易日大盘回顾
 """
 import requests
 import os
@@ -19,10 +19,10 @@ from utils import feishu_webhook as fw
 from utils.push_guard import edition_date, mark_pushed, should_skip
 
 WORKFLOW_FILE = "morning-news.yml"
-# 档期日界取早 08:00：08:43 正常档与延迟到当天 13:00（甚至次日 07:00）的触发
-# 都归到同一档。不能用 12 —— 08:43 减 12h 会落到前一天，与中午的延迟档分家。
+# 档期日界取早 08:00：08:13 正常档与延迟到当天 13:00（甚至次日 07:00）的触发
+# 都归到同一档。不能用 12 —— 08:13 减 12h 会落到前一天，与中午的延迟档分家。
 EDITION_CUTOFF_HOUR = 8
-# 目标档期整点（08:43 档），按「运行时刻 − 8h」归并（与 cutoff 等价，改用显式
+# 目标档期整点（08:13 档），按「运行时刻 − 8h」归并（与 cutoff 等价，改用显式
 # slot_hour 是为了和其他脚本统一口径）。第二天凌晨才跑到的迟到运行仍归前一天，
 # 不会把当天早间档提前标记成已推送。
 EDITION_SLOT_HOUR = 8
@@ -149,7 +149,7 @@ def main():
         return
 
     # 标题用「档期日期」而非运行日期。GitHub cron 在本账号实测延迟
-    # 4h45m~8h13m 且频繁跨过午夜：08:43 档曾在北京 15:02 才跑，晚间档
+    # 4h45m~8h13m 且频繁跨过午夜：早间档曾在北京 15:02 才跑，晚间档
     # 甚至次日凌晨才到。用运行日会把前一天的档期标成新的一天。
     edition = edition_date(now, EDITION_CUTOFF_HOUR, EDITION_SLOT_HOUR).isoformat()
     lines.append(f"☀️ 早安缅A · {edition} 档期")

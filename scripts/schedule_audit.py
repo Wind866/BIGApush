@@ -124,7 +124,7 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                 row["status"] = "— 非当日档期"
                 rows.append(row)
                 continue
-            # 计划时刻还没到（白天查 22:13 的档期）不能算「未到」，否则对账天天报假警
+            # 计划时刻还没到（白天查 21:53 的档期）不能算「未到」，否则对账天天报假警
             if planned > datetime.now(BJ):
                 row["status"] = "⏳ 未到时刻"
                 rows.append(row)
@@ -135,7 +135,7 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                 wid = info["id"]
                 # 按「日期 + 具体 workflow」精确查询。旧版拉仓库级最近 100 条再按
                 # workflow_id 过滤：本仓库 10 个工作流每天触发多次，100 条只够覆盖
-                # 一两天；跨天对账时前一日 08:43 的记录早被挤出列表，会被误报成
+                # 一两天；跨天对账时前一日 08:13 的记录早被挤出列表，会被误报成
                 # 「❌ 未到」并触发一条假的漏跑告警。
                 # 查询上限放到次日，是为了容纳晚间档最长 +10 小时的跨日延迟。
                 next_day = (datetime.fromisoformat(day).date() + timedelta(days=1)).isoformat()
@@ -152,7 +152,7 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
 
             # 档期窗口＝[计划时刻 − 5 分钟, 计划时刻 + 10 小时]，允许跨日。
             # 旧实现按「日历日」收集当天全部触发再取最早，会把*前一个档期*迟到的运行
-            # 算到本档期头上：晚间新闻 22:13 次日 00:18 到达，会被记成「实到 00:18、
+            # 算到本档期头上：晚间新闻 21:53 次日 00:18 到达，会被记成「实到 00:18、
             # 偏差 −1314 分」；反过来当晚真的没跑时又要等到次日才看得见。
             # 上限定为 10 小时的依据：本账号 schedule 实测最长延迟 8h13m（收盘选股），
             # 原来的 +6h 会把这些「虽然迟到但确实跑了」的运行误报成「❌ 未到」。
@@ -242,7 +242,7 @@ def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
 def default_audit_day() -> str:
     """返回「刚过去的那个完整日」（北京时间）。
 
-    归档 cron 是北京 23:30，但本账号 GitHub schedule 实测延迟 3~10 小时。
+    归档 cron 是北京 22:33，但本账号 GitHub schedule 实测延迟 3~10 小时。
     一旦凌晨才真正跑起来，datetime.now(BJ).date() 已经是新的一天，脚本会把
     前一天所有档期标成「⏳ 未到时刻」，前一天的漏跑就永远没人核对 ——
     监控任务自己被调度延迟打瞎。因此中午 12 点之前一律回看前一天。

@@ -32,10 +32,10 @@ sys.path.insert(0, str(project_root))
 # 版本信息
 __version__ = "1.0.0"
 
-# 收盘选股的目标档期整点（15:43 档）。档期键按「运行时刻 − 15h」归并，
+# 收盘选股的目标档期整点（19:33 档）。档期键按「运行时刻 − 19h」归并，
 # 当晚 23 点甚至次日 01:25 才跑到的迟到运行仍算当天的收盘档，
 # 不会把次日的档期提前占掉（旧实现用固定 cutoff=12，跨日就串档）。
-SELECTION_SLOT_HOUR = 15
+SELECTION_SLOT_HOUR = 19
 
 from utils.akshare_fetcher import AKShareFetcher
 from utils.db_manager import DBManager

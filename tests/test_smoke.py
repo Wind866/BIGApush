@@ -57,7 +57,7 @@ class TestPythonSyntax(unittest.TestCase):
 
 class TestWorkerPlan(unittest.TestCase):
     def test_expected_unique_slots(self):
-        # 23:30「档期对账」纳入 PLAN 后是 10 档。这条断言防的是「档期被意外删掉」，
+        # 「档期对账」纳入 PLAN 后是 10 档。这条断言防的是「档期被意外删掉」，
         # 不是把数字当成目标；新增档期时请同步 cloudflare/README.md 的档期表。
         plan = parse_plan()
         self.assertEqual(len(plan), 10, f"档期数量应为 10，实际 {len(plan)}")
@@ -124,7 +124,7 @@ class TestSchedulerReliability(unittest.TestCase):
         self.assertIn("build: BUILD", src)
 
     def test_schedule_audit_runs_every_day(self):
-        """PLAN 含 days: all 档期（08:43 / 22:13 周末也推），对账不能只跑工作日。"""
+        """PLAN 含 days: all 档期（08:13 / 21:53 周末也推），对账不能只跑工作日。"""
         src = read(os.path.join(".github", "workflows", "schedule-audit.yml"))
         cron = re.search(r"cron:\s*'([^']+)'", src)
         self.assertIsNotNone(cron, "档期对账工作流缺少 cron")

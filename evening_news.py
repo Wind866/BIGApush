@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 晚间股市新闻推送
-每天 22:13（北京时间）运行，推送当日收盘总结和晚间要闻
+每天 21:53（北京时间）运行，推送当日收盘总结和晚间要闻
 """
 import requests
 import os
@@ -20,10 +20,10 @@ from utils.push_guard import edition_date, mark_pushed, should_skip
 
 # 本文件对应的工作流，用于幂等检查（外部定时器与仓库 cron 会重复触发）
 WORKFLOW_FILE = "evening-news.yml"
-# 目标档期整点（22:13 档）。档期键按「运行时刻 − 22h」归并，所以次日凌晨甚至
+# 目标档期整点（21:53 档）。档期键按「运行时刻 − 21h」归并，所以次日凌晨甚至
 # 上午 11 点才跑到的迟到运行，仍然算作**前一天**的晚间档，不会把当天的档期
 # 提前标记成"已推送"而导致当晚漏推。
-EDITION_SLOT_HOUR = 22
+EDITION_SLOT_HOUR = 21
 EDITION_CUTOFF_HOUR = 8
 
 # 内容闸门：三个数据块里至少要有 2 块拿到真实数据才允许推送。
@@ -147,7 +147,7 @@ def main():
         return
 
     # 标题用「档期日期」而非运行日期。本账号 cron 实测延迟 4h57m~7h18m，
-    # 22:13 档常在次日凌晨 03:00~05:30 才跑；用运行日会把前一天的档期标成新的一天。
+    # 晚间档常在次日凌晨 02:00~05:30 才跑；用运行日会把前一天的档期标成新的一天。
     edition = edition_date(now, EDITION_CUTOFF_HOUR, EDITION_SLOT_HOUR).isoformat()
     lines.append(f"🌙 晚间缅A · {edition} 档期")
     lines.append(f"数据时点：{now:%Y-%m-%d %H:%M}（北京时间）")

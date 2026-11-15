@@ -2,10 +2,10 @@ name: Keep Alive
 
 # GitHub 只在仓库连续 60 天无任何活动时才禁用定时任务，每周一次足够。
 # 原来每天一次会产生大量 "chore: keep alive" 噪音提交，这里改为每周一
-# UTC 17:00（北京时间周二 01:00），并顺便裁剪日志，避免无限膨胀。
+# UTC 17:03（北京时间周二 01:03），并顺便裁剪日志，避免无限膨胀。
 on:
   schedule:
-    - cron: '0 17 * * 1'
+    - cron: '3 17 * * 1'
   workflow_dispatch:
 
 permissions:

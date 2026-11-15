@@ -36,6 +36,36 @@ jobs:
         run: |
           python check_sources.py --markdown --out sources-health.json >> "$GITHUB_STEP_SUMMARY"
 
+      # 交易日历一旦拉不到，is_trading_day 会静默退回「排除周末」——节假日被当成
+      # 交易日，节后回看算错。这个步骤存在的唯一意义，就是把那次静默降级变成一次
+      # 可见的失败（并走下面已有的告警链路）。周检一次即可：日历按年更新。
+      - name: 校验交易日历可用性
+        run: |
+          python -m pip install -q "akshare==1.20.42"
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          from utils.trade_date_utils import calendar_status
+
+          status = calendar_status()
+          print(json.dumps(status, ensure_ascii=False, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as fh:
+              fh.write("\n### 交易日历\n\n")
+              for key, value in status.items():
+                  fh.write(f"- {key}: `{value}`\n")
+
+          if not status["loaded"]:
+              sys.exit("交易日历未能加载：is_trading_day 会退回「排除周末」，节假日将被误判为交易日")
+          if not status["covers_today"]:
+              sys.exit(
+                  f"交易日历只覆盖到 {status['max_date']}，未含今天；"
+                  "超出范围的日期会按「排除周末」判断，请确认数据源是否已发布新一年的日历"
+              )
+          print("交易日历校验通过")
+          PY
+
       - name: 保存检查结果
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

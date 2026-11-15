@@ -523,18 +523,73 @@ def fetch_index_timestamp() -> tuple[int, str]:
 # 新闻 / 指数 / 板块（早间与晚间新闻共用）
 # ---------------------------------------------------------------------------
 
-def _news_lines(items: list[tuple[str, str]], count: int) -> list[str]:
+BJ_TZ = dt.timezone(dt.timedelta(hours=8))
+# 早 / 晚间新闻共用一个抓取层；超过 24 小时的滚动条目属于旧闻，不该混进
+# 「今日要闻」。周末新闻量小，有几条推几条即可，不强行凑满 count。
+NEWS_MAX_AGE_HOURS = 24
+
+
+def _news_timestamp(item: dict) -> int | None:
+    """从各源字段里取发布时间（Unix 秒）；解析不了返回 None。
+
+    实测：新浪滚动用 ctime / intime，同花顺快讯用 ctime / rtime，均为秒级字符串。
+    保留多字段兜底，避免上游改字段名后整源被误判成「全部过期」。
+    """
+    for key in ("ctime", "rtime", "intime", "time", "create_time", "pub_time"):
+        raw = item.get(key)
+        if raw in (None, "", 0, "0"):
+            continue
+        text = str(raw).strip()
+        if text.isdigit():
+            ts = int(text)
+            if ts > 10_000_000_000:      # 毫秒时间戳
+                ts //= 1000
+            return ts
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", text)
+        if m:
+            try:
+                return int(dt.datetime(*(int(x) for x in m.groups()), tzinfo=BJ_TZ).timestamp())
+            except ValueError:
+                continue
+    return None
+
+
+def _news_lines(items: list[tuple[str, str, int | None]], count: int,
+                max_age_hours: float = NEWS_MAX_AGE_HOURS,
+                now_ts: float | None = None) -> list[str]:
+    """把新闻条目渲染成卡片行：过滤旧闻 + 标题去重 + 标注发布时间。
+
+    旧版只取 title / intro，完全忽略时间字段：滚动榜里混进几天前的置顶稿、
+    早间档和晚间档推同一批新闻都无从发现，卡片上也没有任何时效信息，
+    读者无法判断这条消息是今早的还是上周的。
+    """
+    now_ts = time.time() if now_ts is None else now_ts
+    cutoff = now_ts - max_age_hours * 3600
     lines: list[str] = []
-    for title, intro in items[:count]:
+    seen: set[str] = set()
+    for title, intro, ts in items:
+        if len(seen) >= count:
+            break
         title = (title or "").strip()
         if not title:
             continue
-        lines.append(f"  • {title}")
+        # 解析不到时间的一律保留：宁可显示一条未标时间的，也不能因为上游
+        # 字段名变化把整源判空、进而触发降级或内容闸门失败。
+        if ts is not None and ts < cutoff:
+            continue
+        norm = re.sub(r"\s+", "", title)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        stamp = ""
+        if ts is not None:
+            stamp = f" [{dt.datetime.fromtimestamp(ts, BJ_TZ):%m-%d %H:%M}]"
+        lines.append(f"  • {title}{stamp}")
         intro = re.sub(r"\s+", " ", (intro or "").strip())[:110]
         if intro:
             lines.append(f"    {intro}")
     if not lines:
-        raise s.SourceFailure("新闻源返回空列表")
+        raise s.SourceFailure("新闻源返回空列表，或全部条目已过期 / 重复")
     return lines
 
 
@@ -545,7 +600,8 @@ def _news_sina_roll(lid: int, count: int) -> list[str]:
     if (data.get("result") or {}).get("status", {}).get("code") not in (0, None):
         raise s.SourceFailure(f"新浪滚动 lid={lid} 返回异常状态")
     items = (data.get("result") or {}).get("data") or []
-    return _news_lines([(n.get("title", ""), n.get("intro", "")) for n in items], count)
+    return _news_lines(
+        [(n.get("title", ""), n.get("intro", ""), _news_timestamp(n)) for n in items], count)
 
 
 def _news_ths(count: int) -> list[str]:
@@ -554,7 +610,8 @@ def _news_ths(count: int) -> list[str]:
                        timeout=8, retries=1)
     data = json.loads(text)
     items = (data.get("data") or {}).get("list") or []
-    return _news_lines([(n.get("title", ""), n.get("digest", "")) for n in items], count)
+    return _news_lines(
+        [(n.get("title", ""), n.get("digest", ""), _news_timestamp(n)) for n in items], count)
 
 
 def _news_ths_page2(count: int) -> list[str]:
@@ -562,7 +619,8 @@ def _news_ths_page2(count: int) -> list[str]:
     text = s.http_text(url, referer="https://news.10jqka.com.cn/",
                        timeout=8, retries=1)
     items = (json.loads(text).get("data") or {}).get("list") or []
-    return _news_lines([(n.get("title", ""), n.get("digest", "")) for n in items], count)
+    return _news_lines(
+        [(n.get("title", ""), n.get("digest", ""), _news_timestamp(n)) for n in items], count)
 
 
 def fetch_news(count: int = 10) -> tuple[list[str], str]:

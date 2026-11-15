@@ -146,5 +146,57 @@ class TestDateWording(unittest.TestCase):
         self.assertNotIn("今日收盘行情", msg)
 
 
+class TestNewsFreshness(unittest.TestCase):
+    """新闻卡片必须能回答「这条消息是什么时候的」。
+
+    旧版 _news_lines 只取 title/intro，滚动榜里混进几天前的置顶稿、
+    早间档与晚间档推同一批新闻都无法发现，读者也无从判断时效。
+    """
+
+    NOW = 1_794_731_310  # 2026-11-15 16:28:30 北京时间
+
+    def test_timestamp_parsing_from_real_source_fields(self):
+        from utils import biga_sources as bs
+
+        self.assertEqual(bs._news_timestamp({"ctime": "1794731310"}), 1794731310)
+        self.assertEqual(bs._news_timestamp({"rtime": "1794731341"}), 1794731341)
+        self.assertEqual(bs._news_timestamp({"intime": "1794731310"}), 1794731310)
+        self.assertEqual(bs._news_timestamp({"ctime": "1794731310000"}), 1794731310)
+        self.assertEqual(bs._news_timestamp({"time": "2026-11-15 16:28"}), 1794731280)
+        self.assertIsNone(bs._news_timestamp({}))
+
+    def test_stale_and_duplicate_items_are_dropped(self):
+        from utils import biga_sources as bs
+
+        fresh = self.NOW - 60
+        old = self.NOW - 40 * 3600
+        items = [
+            ("今日要闻", "摘要", fresh),
+            ("今日要闻", "同一条的重复抓取", fresh),
+            ("三天前的旧闻", "", old),
+            ("上游没给时间字段的稿子", "摘要", None),
+        ]
+        lines = bs._news_lines(items, count=10, now_ts=self.NOW)
+        text = "\n".join(lines)
+        self.assertIn("今日要闻", text)
+        self.assertIn("上游没给时间字段的稿子", text)
+        self.assertNotIn("三天前的旧闻", text)
+        self.assertEqual(sum(1 for line in lines if line.startswith("  • ")), 2)
+        self.assertIn("[11-15 16:27]", text, "卡片必须标出每条新闻的发布时间")
+
+    def test_all_stale_raises_so_provider_can_fall_back(self):
+        from utils import biga_sources as bs
+
+        old = self.NOW - 40 * 3600
+        with self.assertRaisesRegex(Exception, "过期|空列表"):
+            bs._news_lines([("旧闻", "", old)], count=10, now_ts=self.NOW)
+
+    def test_every_news_provider_passes_timestamps(self):
+        """新增新闻源时别忘了把发布时间传进渲染层。"""
+        with open(os.path.join(ROOT, "utils", "biga_sources.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertGreaterEqual(src.count("_news_timestamp(n)"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

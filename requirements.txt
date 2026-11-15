@@ -10,8 +10,12 @@
 # 确认真实执行路径上未加载的包，再分批移除并跑通 CI。当前保持全量安装。
 # akshare 只锁大版本时被上游改接口打过脸：stock_zh_valuation_baidu 的指标名
 # 从「市盈率」改成「市盈率(TTM)」、部分接口悄悄下线（新浪 newSinaGN.php 已 404）。
-# 收到小版本上界，升级必须走 PR + verify-valuation 工作流复验真实取数。
-akshare>=1.20.0,<1.21
+# 生产路径（selection.yml 装本文件）必须与 stock-query.yml / verify-valuation.yml
+# 的 akshare==1.20.42 完全一致，否则「验证工作流跑通」不等于「生产取数正确」：
+# 上游发新版当天，生产会静默装到另一个版本，取数字段可能对不上。
+# 升级流程：同时改本文件与两个 workflow 的 pin → 跑 verify-valuation.yml 实测
+# 估值/资金流/行情真实取数 → 通过后合并。
+akshare==1.20.42
 pandas>=2.0.0,<3
 numpy>=1.24.0,<3
 requests>=2.31.0,<3

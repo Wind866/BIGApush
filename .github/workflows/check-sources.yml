@@ -57,3 +57,18 @@ jobs:
         run: |
           python scripts/alert.py "⚠️ 数据源健康自检任务运行失败，请查看日志" --run-url "$RUN_URL" \
             || echo "::error::告警发送失败（独立告警通道可能也失效）"
+
+      # job 被整体取消（timeout-minutes 到点 / 手动 cancel）时状态是 cancelled 不是
+      # failure，GitHub 不会执行上面那条 if: failure() —— 超时恰恰是最需要告警的时刻。
+      - name: 超时 / 取消兜底告警
+        if: always() && job.status == 'cancelled'
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/alert.py "⚠️ 数据源健康自检 job 被取消或超时（failure() 告警不会触发）" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"

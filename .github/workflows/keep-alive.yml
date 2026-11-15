@@ -56,3 +56,31 @@ jobs:
           done
           echo "::error::连续 3 次推送失败，本周心跳未入库"
           exit 1
+
+      # 心跳失败自己不会有人看 Actions 页：等到 60 天无活动、定时任务被 GitHub
+      # 停用时才发现就晚了。而且超时/取消时 if: failure() 同样不触发。
+      - name: 心跳失败告警
+        if: failure()
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/alert.py "⚠️ Keep Alive 心跳未入库（连续推送失败），定时任务有被停用风险" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"
+
+      - name: 超时 / 取消兜底告警
+        if: always() && job.status == 'cancelled'
+        env:
+          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python scripts/alert.py "⚠️ Keep Alive 心跳 job 被取消或超时（failure() 告警不会触发）" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"

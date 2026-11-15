@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """当日 9 档期「应到 / 实到」对账 —— 把「按时完成」变成可核对的数字。
 
+「实到」只认 **conclusion=success** 的运行。旧版只看 created_at，一个失败或
+被取消的 run 也会被记成「✅ 准点」，对账全绿却当天没推成功 —— 触发 ≠ 成功。
+
 档期表直接解析 cloudflare/worker.js 的 PLAN（唯一事实来源），
 实到记录来自 GitHub Actions runs API。输出：
   * docs/schedule-audit.md      可上传为 artifact 的 Markdown 报告
@@ -32,6 +35,9 @@ BJ = timezone(timedelta(hours=8))
 API = "https://api.github.com"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OWNER = "Wind866"
+
+# 这些结论表示「已经触发但还没结束」，既不算成功也不能判失败
+PENDING_CONCLUSIONS = {"", "in_progress", "queued", "waiting", "requested", "pending"}
 
 
 def parse_plan() -> list[dict]:
@@ -155,16 +161,37 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                     run["created_at"].replace("Z", "+00:00")
                 ).astimezone(BJ)
                 if window_lo <= created <= window_hi:
-                    hits.append(created)
+                    # 结论必须一起记：只认 created_at 的话，一个 failure / cancelled
+                    # 的 run 也会被记成「✅ 准点」，于是「对账全绿」掩盖了当天根本
+                    # 没推成功。触发 ≠ 成功。
+                    hits.append((created, (run.get("conclusion") or run.get("status") or "").lower()))
             if not hits:
                 row["status"] = "❌ 未到"
             else:
-                first = min(hits)
-                delay = int((first - planned).total_seconds() / 60)
-                row["actual"] = first.strftime("%H:%M:%S")
-                row["delay"] = f"{delay:+d} 分"
-                row["status"] = "✅ 准点" if -5 <= delay <= 5 else "⚠️ 延迟"
-                row["note"] = f"当日命中 {len(hits)} 次触发"
+                ok = [h for h in hits if h[1] == "success"]
+                running = [h for h in hits if h[1] in PENDING_CONCLUSIONS]
+                if ok:
+                    first = min(ok)[0]
+                    delay = int((first - planned).total_seconds() / 60)
+                    row["actual"] = first.strftime("%H:%M:%S")
+                    row["delay"] = f"{delay:+d} 分"
+                    row["status"] = "✅ 准点" if -5 <= delay <= 5 else "⚠️ 延迟"
+                    row["note"] = f"当日命中 {len(hits)} 次触发，成功 {len(ok)} 次"
+                elif running:
+                    # 还没跑完（延迟到对账时刻之后），既不算准点也不算失败
+                    first = min(hits)[0]
+                    row["actual"] = first.strftime("%H:%M:%S")
+                    row["status"] = "🔄 运行中"
+                    row["note"] = "触发已到达但尚未结束，下次对账再判定"
+                else:
+                    first, concl = min(hits)
+                    row["actual"] = first.strftime("%H:%M:%S")
+                    row["delay"] = f"{int((first - planned).total_seconds() / 60):+d} 分"
+                    row["status"] = "❌ 触发但失败"
+                    row["note"] = (
+                        f"当日命中 {len(hits)} 次触发，结论均为 "
+                        f"{'/'.join(sorted({c or '未知' for _, c in hits}))}（未成功推送）"
+                    )
             rows.append(row)
     return rows, covered, sum(1 for r in rows if r["due"])
 
@@ -172,11 +199,12 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
 def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
     arrived = sum(1 for r in rows if r["status"].startswith(("✅", "⚠️")))
     missing = sum(1 for r in rows if r["status"].startswith("❌"))
+    running = sum(1 for r in rows if r["status"].startswith("🔄"))
     lines = [
         f"# 档期对账 · {day}（北京时间）",
         "",
         f"- 当日应到：**{expected}** 个目标 · 可核对：**{covered}** 个",
-        f"- 实到：**{arrived}** · 未到：**{missing}**",
+        f"- 实到（推送成功）：**{arrived}** · 未到或未成功：**{missing}** · 运行中：**{running}**",
         f"- 未覆盖：**{sum(1 for r in rows if r['status'].startswith('⬜') and r['due'])}** 个档期"
         "（缺 `AUDIT_PAT` 或私有仓库无权限）—— **这些档期的漏跑本次根本不会被发现**",
         "- 档期表来源：`cloudflare/worker.js` 的 `PLAN`；「⬜ 未覆盖」表示缺 `AUDIT_PAT`，不代表任务没跑",
@@ -193,7 +221,11 @@ def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
     lines += [
         "",
         "> ✅ 偏差 ≤5 分钟；⚠️ 有触发但延迟（GitHub cron 兜底常晚数小时）；"
-        "❌ 应到且可核对，但当天没有任何触发记录；⏳ 计划时刻还没到，本次不判定。",
+        "❌ 应到且可核对，但当天没有成功推送（没触发，或触发了但全部失败/取消）；"
+        "🔄 已触发但还没跑完，本次不判定；⏳ 计划时刻还没到，本次不判定。",
+        "",
+        "> 「❌ 触发但失败」表示**确实跑了但没推成功**——失败告警可能已经单独发过，"
+        "这条对账是兜底，两者都看到才说明告警链路本身是通的。",
         "",
     ]
     return "\n".join(lines)
@@ -235,15 +267,23 @@ def main() -> int:
         with open(summary, "a", encoding="utf-8") as fh:
             fh.write(report)
 
-    missing = sum(1 for r in rows if r["status"].startswith("❌"))
+    not_run = sum(1 for r in rows if r["status"] == "❌ 未到")
+    failed = sum(1 for r in rows if r["status"] == "❌ 触发但失败")
+    missing = not_run + failed
+    running = sum(1 for r in rows if r["status"].startswith("🔄"))
     uncovered = sum(1 for r in rows if r["status"].startswith("⬜") and r["due"])
     if uncovered:
         print(f"::warning::{uncovered} 个当日档期未能核对（缺 AUDIT_PAT / 私有仓库无权限）。"
               "这部分档期即使漏跑也不会被本次对账发现，请补配 PAT 后重跑。")
+    if not_run:
+        print(f"::error::{not_run} 个当日应到档期没有任何触发记录")
+    if failed:
+        print(f"::error::{failed} 个当日档期触发了但全部失败/取消（当天没有成功推送）")
     if missing:
-        print(f"::error::{missing} 个当日应到档期没有任何触发记录")
         return 1
-    print("档期对账完成：无已覆盖范围内的漏跑")
+    if running:
+        print(f"::warning::{running} 个档期已触发但仍在运行，本次未判定，稍后可重跑对账")
+    print("档期对账完成：已覆盖范围内全部推送成功")
     return 0
 
 

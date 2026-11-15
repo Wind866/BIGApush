@@ -8,64 +8,85 @@ import base64
 from cryptography.fernet import Fernet
 
 class CryptoUtils:
-    """加密工具类"""
-    
-    # 默认密钥（需要在实际使用时替换为安全的密钥）
-    DEFAULT_KEY = b'your-secret-key-here-must-be-32-url-safe-base64-bytes'
-    
+    """加密工具类
+
+    ⚠️ 不再内置默认密钥。旧的 DEFAULT_KEY 是 53 字节占位串，不是合法的 Fernet
+    密钥（必须 44 字符 urlsafe-base64）；`Fernet(key)` 抛 ValueError 后被静默
+    catch，改用**一次性随机密钥**加密并把密钥随手丢掉 —— 密文永远解不开，而且
+    不报错。现在改成显式失败：宁可在这里炸掉，也不要留下一堆读不回来的密文。
+    """
+
+    # 已移除的占位密钥。保留属性只为让遗留引用立刻暴露（None 会直接报错，
+    # 而不是被当成一个"看起来能用"的密钥继续加密）。
+    DEFAULT_KEY = None
+
+    @staticmethod
+    def _build_fernet(key, action: str) -> Fernet:
+        """统一校验密钥；不合法就报错，绝不静默换密钥。"""
+        if key is None:
+            raise RuntimeError(
+                f"CryptoUtils.{action}() 必须显式传入密钥（44 字符 urlsafe-base64，"
+                "可用 CryptoUtils.generate_key() 生成）。内置默认密钥已移除：旧实现"
+                "会静默改用一次性随机密钥加密，密钥随即丢失，密文永远解不开。"
+            )
+        if isinstance(key, str):
+            key = key.encode("utf-8")
+        try:
+            return Fernet(key)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"CryptoUtils.{action}() 的密钥不合法，需要 44 字符 urlsafe-base64"
+                f"（当前 {len(key) if isinstance(key, (bytes, str)) else type(key).__name__}）：{exc}"
+            ) from exc
+
     @staticmethod
     def generate_key() -> bytes:
         """生成加密密钥
-        
+
         Returns:
             32字节的URL安全base64编码密钥
         """
         return Fernet.generate_key()
-    
+
     @staticmethod
     def encrypt(data: str, key: bytes = None) -> str:
         """加密字符串
-        
+
         Args:
-            data: 要加密的字符串
-            key: 加密密钥，默认为DEFAULT_KEY
-            
+            data: 要加密的数据
+            key: 加密密钥（必填，44 字符 urlsafe-base64）
+
         Returns:
             加密后的base64字符串
+
+        Raises:
+            RuntimeError: 未传密钥
+            ValueError: 密钥格式不合法
         """
-        if key is None:
-            key = CryptoUtils.DEFAULT_KEY
-        
-        # 确保密钥是URL安全的base64编码
-        try:
-            fernet = Fernet(key)
-        except ValueError:
-            # 如果密钥无效，使用默认密钥重新生成
-            fernet = Fernet(CryptoUtils.generate_key())
-        
+        fernet = CryptoUtils._build_fernet(key, "encrypt")
         encrypted = fernet.encrypt(data.encode('utf-8'))
         return base64.urlsafe_b64encode(encrypted).decode('utf-8')
-    
+
     @staticmethod
     def decrypt(encrypted_data: str, key: bytes = None) -> str:
         """解密字符串
-        
+
+        保留「解不开就原样返回」的宽容语义：调用方（授权配置读取）靠这个降级，
+        密文/密钥不匹配时不该让整个流程崩掉。
+
         Args:
-            encrypted_data: 加密的base64字符串
-            key: 解密密钥，默认为DEFAULT_KEY
-            
+            encrypted_data: 加密后的base64字符串
+            key: 解密密钥（44 字符 urlsafe-base64）
+
         Returns:
-            解密后的原始字符串
+            解密后的原始数据；密钥缺失或不匹配时返回原文
         """
-        if key is None:
-            key = CryptoUtils.DEFAULT_KEY
-        
         try:
-            fernet = Fernet(key)
+            fernet = CryptoUtils._build_fernet(key, "decrypt")
             encrypted_bytes = base64.urlsafe_b64decode(encrypted_data)
             decrypted = fernet.decrypt(encrypted_bytes)
             return decrypted.decode('utf-8')
-        except Exception as e:
+        except Exception:
             # 如果解密失败，返回原始数据
             return encrypted_data
 

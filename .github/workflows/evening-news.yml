@@ -6,6 +6,8 @@ name: 晚间新闻
 on:
   schedule:
     - cron: '13 14 * * *'
+    - cron: '13 15 * * *'
+    - cron: '13 16 * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -42,6 +44,7 @@ jobs:
       - name: 推送晚间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           EXPECT_HHMM: "${{ github.event_name == 'schedule' && '2213' || '' }}"
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
@@ -51,14 +54,11 @@ jobs:
         if: failure()
         env:
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
         run: |
-          if [ -z "$ALERT_WEBHOOK" ]; then
-            echo "::error::未配置独立告警 Secret ALERT_WEBHOOK；本次告警退回业务 webhook，业务 webhook 故障时告警会一并失效"
-          fi
-          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
-          if [ -z "$HOOK" ]; then echo "::error::未配置告警 webhook，跳过失败告警"; exit 0; fi
-          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
-            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 晚间新闻任务运行失败，请查看日志：$RUN_URL\"}}" \
-            >/dev/null || echo "::error::告警发送失败（独立告警通道可能也失效）"
+          python scripts/alert.py "⚠️ 晚间新闻任务运行失败，请查看日志" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"

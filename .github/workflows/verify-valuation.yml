@@ -25,6 +25,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # 安全：workflow_dispatch 的 inputs 绝不能插进 run: 里的源码字符串
+      # （旧版 5 处 inputs.stocks 插值出现在 Python heredoc 中，可注入代码）。
+      # 这里先按 6 位数字白名单清洗，再经 GITHUB_ENV 传给后续步骤。
+      - name: 校验股票代码输入
+        env:
+          RAW_STOCKS: ${{ inputs.stocks }}
+        run: |
+          python - <<'PY'
+          import os, re
+          raw = os.environ.get("RAW_STOCKS", "")
+          codes = [c.strip() for c in raw.split(",") if c.strip()]
+          bad = [c for c in codes if not re.fullmatch(r"\d{6}", c)]
+          if not codes or len(codes) > 10 or bad:
+              raise SystemExit(f"非法股票代码输入（须为 1~10 个 6 位数字）：{bad[:3]}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("STOCK_CODES=" + ",".join(codes) + "\n")
+          print("校验通过：", ",".join(codes))
+          PY
+
       - name: 检出仓库
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -39,11 +58,11 @@ jobs:
       - name: 真实估值取数验证
         run: |
           python - <<'PY'
-          import json, sys
+          import json, os, sys
           sys.path.insert(0, '.')
           from stock_analyzer import real_fundamentals as rf
 
-          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          codes = [c.strip() for c in os.environ.get("STOCK_CODES", "").split(',') if c.strip()]
           all_ok = True
           for code in codes:
               val = rf.get_real_valuation(code)
@@ -61,14 +80,14 @@ jobs:
       - name: 资金流 + 行情兜底验证
         run: |
           python - <<'PY'
-          import json, sys
+          import json, os, sys
           sys.path.insert(0, '.')
           from stock_analyzer.data_fetcher import DataFetcher
 
           # 跳过 __init__（避免 DB/yaml 等与本检查无关的初始化依赖），
           # get_fund_flow / get_stock_quote 不依赖 db_manager/session。
           f = object.__new__(DataFetcher)
-          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          codes = [c.strip() for c in os.environ.get("STOCK_CODES", "").split(',') if c.strip()]
           ff_ok = 0
           q_ok = 0
           for code in codes:
@@ -88,7 +107,7 @@ jobs:
       - name: 基础信息(名称/行业) + 长周期行情(MA200) 验证
         run: |
           python - <<'PY'
-          import json, sys
+          import json, os, sys
           sys.path.insert(0, '.')
           from stock_analyzer.data_fetcher import DataFetcher
           from stock_analyzer.technical_analyzer import TechnicalAnalyzer
@@ -97,7 +116,7 @@ jobs:
           # 且 400 自然日行情足以算出 MA200、趋势不再退化为「未知」。
           f = object.__new__(DataFetcher)
           f.DEFAULT_STOCK_LIST = {}
-          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          codes = [c.strip() for c in os.environ.get("STOCK_CODES", "").split(',') if c.strip()]
           info_ok = bars_ok = trend_ok = 0
           for code in codes:
               b = f.get_stock_basic(code)
@@ -120,7 +139,7 @@ jobs:
       - name: 技术指标真实值(MACD/KDJ/BOLL/RSI) 验证
         run: |
           python - <<'PY'
-          import json, sys
+          import json, os, sys
           sys.path.insert(0, '.')
           from stock_analyzer import StockAnalyzer
           from stock_analyzer.data_fetcher import DataFetcher
@@ -130,7 +149,7 @@ jobs:
           f = object.__new__(DataFetcher)
           f.DEFAULT_STOCK_LIST = {}
           sa = object.__new__(StockAnalyzer)
-          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          codes = [c.strip() for c in os.environ.get("STOCK_CODES", "").split(',') if c.strip()]
           ok = 0
           for code in codes:
               q = f.get_stock_quote(code, '400d')
@@ -180,7 +199,7 @@ jobs:
           # 3) 市值：腾讯批量源（新主源）必须给出「元」量级真值
           from utils.stock_data_fetcher import StockDataFetcher
           sdf = object.__new__(StockDataFetcher)
-          codes = [c.strip() for c in "${{ inputs.stocks }}".split(',') if c.strip()]
+          codes = [c.strip() for c in os.environ.get("STOCK_CODES", "").split(',') if c.strip()]
           caps = sdf._fetch_market_cap_tencent(codes)
           ok_cap = len(caps) == len(codes) and all(v > 1e9 for v in caps.values())
           print("[CAP] " + json.dumps({k: f'{v/1e8:.2f}亿' for k, v in caps.items()}, ensure_ascii=False))

@@ -6,6 +6,7 @@ name: 收盘选股
 on:
   schedule:
     - cron: '43 7 * * 1-5'
+    - cron: '43 8 * * 1-5'
   workflow_dispatch:
     inputs:
       skip_update:
@@ -101,6 +102,7 @@ jobs:
         if: steps.trading.outputs.is_trading == 'true' || inputs.force == true
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
           # 冷启动（库不存在）刚跑完 init，数据已是最新；再走一遍增量更新纯属重复耗时，
@@ -119,14 +121,11 @@ jobs:
         if: failure()
         env:
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
         run: |
-          if [ -z "$ALERT_WEBHOOK" ]; then
-            echo "::error::未配置独立告警 Secret ALERT_WEBHOOK；本次告警退回业务 webhook，业务 webhook 故障时告警会一并失效"
-          fi
-          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
-          if [ -z "$HOOK" ]; then echo "::error::未配置告警 webhook，跳过失败告警"; exit 0; fi
-          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
-            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 收盘选股任务运行失败，请查看日志：$RUN_URL\"}}" \
-            >/dev/null || echo "::error::告警发送失败（独立告警通道可能也失效）"
+          python scripts/alert.py "⚠️ 收盘选股任务运行失败，请查看日志" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"

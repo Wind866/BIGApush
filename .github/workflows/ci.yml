@@ -4,8 +4,18 @@ name: CI · 语法 / 单元 / 档期表
 # utils/buy_signal_judger.py 的 f-string 语法错误也一直无人发现。
 on:
   pull_request:
+  # 原写法是 branches-ignore: [main]：本仓库大量改动直接提交到 main（含 bot
+  # 台账提交），等于生产分支零校验。改成按路径触发：只改 .push-state / 数据文件
+  # 的每日提交不会触发，任何代码 / 工作流 / 配置变更都会跑门禁。
   push:
-    branches-ignore: [main]
+    paths:
+      - '**.py'
+      - '**.js'
+      - '**.mjs'
+      - 'config/**'
+      - 'requirements.txt'
+      - '.github/**'
+      - 'README.md'
   workflow_dispatch:
 
 permissions:
@@ -29,7 +39,9 @@ jobs:
           python-version: '3.11'
 
       - name: 安装校验依赖
-        run: python -m pip install -q "PyYAML>=6.0,<7" pyflakes
+        # requests 是 daily_news.py / sector_data.py 的运行时依赖；不装的话
+        # 单测里 import 新闻脚本会在 CI 上直接 ImportError。
+        run: python -m pip install -q "PyYAML>=6.0,<7" pyflakes requests
 
       - name: Python 全仓库语法检查
         run: python -m compileall -q .
@@ -127,3 +139,48 @@ jobs:
             exit 1
           fi
           echo "全部 Action 已固定到 commit SHA"
+
+      # 告警必须走 scripts/alert.py：裸 curl 不发 sign 字段、也不解析飞书业务码，
+      # 机器人开启加签后告警会静默哑掉（19021 但 HTTP 200）。
+      - name: 告警通道统一入口检查
+        run: |
+          # 逐文件检查并跳过 ci.yml 自身：否则这条 grep 模式会匹配到自己
+          # （脚本里写着 'curl ...$HOOK' 这个待检模式），门禁永远判红。
+          for f in .github/workflows/*.yml; do
+            if [ "$f" = ".github/workflows/ci.yml" ]; then continue; fi
+            if grep -qE 'curl .*POST.*[$]HOOK' "$f"; then
+              echo "::error::$f 仍是裸 curl 告警，请改用 python scripts/alert.py"
+              exit 1
+            fi
+            if grep -q 'if: failure()' "$f" && ! grep -q 'scripts/alert.py' "$f"; then
+              echo "::error::$f 有失败告警但未走统一入口"
+              exit 1
+            fi
+          done
+          echo "全部失败告警均走带签名的 scripts/alert.py"
+
+      # workflow_dispatch 的 inputs 绝不能插值进 run 脚本（表达式注入）。
+      # 正确做法：env: 传入 + os.environ 读取，或先白名单清洗。
+      - name: Workflow 输入注入检查
+        run: |
+          python - <<'PY'
+          import glob
+          import yaml
+
+          bad = []
+          # 用 chr(36) 拼出表达式前缀：workflow 文件里出现未闭合的模板起始
+          # 符号会被 Actions 当成表达式解析，导致整个 ci.yml 解析失败（jobs=0）。
+          needle = chr(36) + "{{ inputs."
+          for path in sorted(glob.glob('.github/workflows/*.yml')):
+              with open(path, encoding='utf-8') as fh:
+                  doc = yaml.safe_load(fh)
+              for job in (doc.get('jobs') or {}).values():
+                  for step in job.get('steps', []):
+                      if needle in (step.get('run') or ''):
+                          bad.append(f"{path}: {step.get('name', '(未命名步骤)')}")
+          if bad:
+              for item in bad:
+                  print(f"::error::{item} 把 inputs 直接插入了 run 脚本")
+              raise SystemExit(1)
+          print('未发现 workflow inputs 源码插值')
+          PY

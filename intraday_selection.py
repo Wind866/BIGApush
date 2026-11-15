@@ -28,7 +28,6 @@ import argparse
 import json
 import os
 import sys
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,6 +35,7 @@ BJ_TZ = timezone(timedelta(hours=8))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils import biga_sources as bs  # noqa: E402  多源容灾层（东财/同花顺/新浪/腾讯）
+from utils import feishu_webhook as fw  # noqa: E402  统一加签 / 重试 / 业务码校验
 from utils.push_guard import mark_pushed, should_skip  # noqa: E402
 
 WORKFLOW_FILE = "intraday-selection.yml"
@@ -539,36 +539,32 @@ def card_to_text(pool: list[dict], overview: dict, quote_ts: int) -> str:
 
 
 def push(payload: dict, fallback: str, webhook: str) -> bool:
-    if not webhook:
-        print("::warning::FEISHU_WEBHOOK 未配置，盘中观察池已生成但不会推送（请在仓库 Secrets 中配置）")
+    """推送交互卡片，失败降级为文本。走统一发送层（加签 / 重试 / 业务码校验）。
+
+    未配置 webhook **必须返回 False**：旧实现返回 True，main() 会紧接着调用
+    mark_pushed() 把「本档期已推送」写进台账，后续补跑全被幂等守卫跳过，
+    当天的盘中快照就永久丢了。
+    """
+    hook = (webhook or "").strip()
+    if not hook:
+        print("::error::FEISHU_WEBHOOK 未配置，盘中观察池已生成但不会推送"
+              "（请在仓库 Settings → Secrets 中配置）")
         print(fallback[:400])
-        return True
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        webhook, data=body,
-        headers={"Content-Type": "application/json; charset=utf-8"},
-    )
+        return False
+
+    secret = fw.resolve_credentials()[1]
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        if result.get("code") == 0 or result.get("StatusCode") == 0:
+        result = fw.send_payload(hook, secret, payload)
+        if fw.response_ok(result):
             print("✅ 飞书交互卡片推送成功")
             return True
         print(f"⚠️ 卡片推送被拒：{result}，降级为文本消息")
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️ 卡片推送异常：{type(exc).__name__} {exc}，降级为文本消息")
 
-    text_body = json.dumps(
-        {"msg_type": "text", "content": {"text": fallback}}, ensure_ascii=False
-    ).encode("utf-8")
     try:
-        req2 = urllib.request.Request(
-            webhook, data=text_body,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-        )
-        with urllib.request.urlopen(req2, timeout=15) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        ok = result.get("code") == 0 or result.get("StatusCode") == 0
+        result = fw.send_text(hook, secret, fallback)
+        ok = fw.response_ok(result)
         print("✅ 文本消息推送成功" if ok else f"❌ 文本推送也被拒：{result}")
         return ok
     except Exception as exc:  # noqa: BLE001

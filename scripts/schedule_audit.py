@@ -127,12 +127,15 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
                 rows.append(row)
                 continue
 
-            # 档期窗口＝[计划时刻 − 5 分钟, 计划时刻 + 6 小时]，允许跨日。
+            # 档期窗口＝[计划时刻 − 5 分钟, 计划时刻 + 10 小时]，允许跨日。
             # 旧实现按「日历日」收集当天全部触发再取最早，会把*前一个档期*迟到的运行
             # 算到本档期头上：晚间新闻 22:13 次日 00:18 到达，会被记成「实到 00:18、
             # 偏差 −1314 分」；反过来当晚真的没跑时又要等到次日才看得见。
+            # 上限定为 10 小时的依据：本账号 schedule 实测最长延迟 8h13m（收盘选股），
+            # 原来的 +6h 会把这些「虽然迟到但确实跑了」的运行误报成「❌ 未到」。
+            # 按 workflow_id 过滤，所以放宽窗口不会把别的工作流算进来。
             window_lo = planned - timedelta(minutes=5)
-            window_hi = planned + timedelta(hours=6)
+            window_hi = planned + timedelta(hours=10)
             hits = []
             for run in runs:
                 if run.get("workflow_id") != wid:

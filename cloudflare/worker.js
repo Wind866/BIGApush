@@ -125,16 +125,55 @@ function matches(slot, bj) {
   return bj.dow === slot.days;
 }
 
+/** 飞书自定义机器人加签：HMAC-SHA256(key=`${ts}\n${secret}`, msg=空) → base64。
+ *  与 utils/feishu_webhook.py 的 gen_sign 完全同口径。 */
+async function feishuSign(secret, timestamp) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw", enc.encode(`${timestamp}\n${secret}`),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new Uint8Array(0)));
+  return btoa(String.fromCharCode(...sig));
+}
+
 async function notify(env, text) {
   const hook = (env.ALERT_WEBHOOK || "").trim();
+  const secret = (env.ALERT_SECRET || "").trim();
   console.log(`[ALERT] ${text}`);
   if (!hook) return; // 没配独立告警通道时至少留在 Worker 日志里
   try {
-    await fetch(hook, {
+    const payload = {
+      msg_type: "text",
+      content: { text: `⚠️ 定时调度异常\n${text}` },
+    };
+    if (secret) {
+      const ts = String(Math.floor(Date.now() / 1000));
+      payload.timestamp = ts;
+      payload.sign = await feishuSign(secret, ts);
+    }
+    const res = await fetch(hook, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ msg_type: "text", content: { text: `⚠️ 定时调度异常\n${text}` } }),
+      body: JSON.stringify(payload),
     });
+    // 飞书业务错误仍是 HTTP 200：不解析 body 就会把 19021（加签失败）
+    // 当成发送成功，告警静默哑掉。
+    let ok = res.ok;
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      const code = body.code ?? body.StatusCode ?? 0;
+      if (code !== 0) {
+        ok = false;
+        detail = `code=${code} ${body.msg || ""}`;
+        if (code === 19021) detail += "（机器人开启加签，请配置 ALERT_SECRET）";
+      }
+    } catch {
+      if (!res.ok) ok = false;
+    }
+    if (!ok) console.error(`[ALERT] 告警未被飞书受理: ${detail}`);
+    else console.log("[ALERT] 告警已发送");
   } catch (err) {
     console.error(`[ALERT] 告警通道也失败了: ${err}`);
   }

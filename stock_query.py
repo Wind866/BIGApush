@@ -33,6 +33,8 @@ import requests
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from utils import feishu_webhook as fw  # noqa: E402  统一加签 / 重试 / 业务码校验
+
 BJ_TZ = timezone(timedelta(hours=8))
 FEISHU_API = "https://open.feishu.cn/open-apis"
 
@@ -257,27 +259,32 @@ def format_stock(index: int, code: str, result: dict, quote: dict,
 # ---------------------------------------------------------------- 推送
 
 def send_feishu(msg: str) -> bool:
-    """推送到飞书群；未配置 webhook 时显式告警而不是假装成功。"""
-    webhook = os.environ.get("FEISHU_WEBHOOK", "").strip()
-    if not webhook:
+    """推送到飞书群；未配置 webhook 时显式失败，不假装成功。
+
+    保留 requests 作为 HTTP 客户端（图片上传链路与既有测试都依赖它），
+    只复用统一发送层的加签与业务码校验。
+    """
+    hook, secret = fw.resolve_credentials()
+    if not hook:
         print("::warning::FEISHU_WEBHOOK 未配置，结论已生成但不会推送（请在仓库 Secrets 中配置）")
         return False
-    try:
-        resp = requests.post(
-            webhook,
-            json={"msg_type": "text", "content": {"text": msg}},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        code = payload.get("code", payload.get("StatusCode"))
-        if code not in (0, None):
-            print(f"❌ 飞书返回错误：{payload}")
+    payload = fw.sign_payload({"msg_type": "text", "content": {"text": msg}}, secret)
+    for attempt in range(2):
+        try:
+            resp = requests.post(hook, json=payload, timeout=15)
+            resp.raise_for_status()
+            result = resp.json()
+            if not fw.response_ok(result):
+                print(f"❌ 飞书返回错误：{result}")
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001 - 网络抖动重试一次
+            if attempt == 0:
+                print(f"⚠️ 飞书推送异常，重试一次：{type(exc).__name__} {exc}")
+                continue
+            print(f"❌ 飞书推送异常：{type(exc).__name__} {exc}")
             return False
-        return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"❌ 飞书推送异常：{type(exc).__name__} {exc}")
-        return False
+    return False
 
 
 def _feishu_token():

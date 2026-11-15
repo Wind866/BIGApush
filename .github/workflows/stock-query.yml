@@ -69,6 +69,7 @@ jobs:
       - name: 分析并推送飞书
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           # 群里发代码触发时，Worker 会把 chat_id 传下来 → 结果回到那个群
           # 群里触发时由 Worker 带入；网页手动跑时可留空，改用仓库变量 FEISHU_CHAT_ID（设一次即可）
           FEISHU_CHAT_ID: ${{ inputs.chat_id || vars.FEISHU_CHAT_ID }}
@@ -93,14 +94,11 @@ jobs:
         if: failure()
         env:
           ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PYTHONIOENCODING: utf-8
         run: |
-          if [ -z "$ALERT_WEBHOOK" ]; then
-            echo "::error::未配置独立告警 Secret ALERT_WEBHOOK；本次告警退回业务 webhook，业务 webhook 故障时告警会一并失效"
-          fi
-          HOOK="${ALERT_WEBHOOK:-$FEISHU_WEBHOOK}"
-          if [ -z "$HOOK" ]; then echo "::error::未配置告警 webhook，跳过失败告警"; exit 0; fi
-          curl -sS -X POST "$HOOK" -H "Content-Type: application/json" \
-            -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"⚠️ 个股查询任务运行失败，请查看日志：$RUN_URL\"}}" \
-            >/dev/null || echo "::error::告警发送失败（独立告警通道可能也失效）"
+          python scripts/alert.py "⚠️ 个股查询任务运行失败，请查看日志" --run-url "$RUN_URL" \
+            || echo "::error::告警发送失败（独立告警通道可能也失效）"

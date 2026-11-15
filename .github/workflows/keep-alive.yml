@@ -35,11 +35,24 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .github/keep-alive.log
+          # -f：即使 .gitignore 把 *.log 忽略了也能提交，心跳不能因一条规则失效
+          git add -f .github/keep-alive.log
           if git diff --staged --quiet; then
             echo "无变更，跳过提交"
-          else
-            git commit -m "chore: keep alive $(date '+%Y-%m-%d')"
-            git pull --rebase origin main
-            git push
+            exit 0
           fi
+          git commit -m "chore: keep alive $(date '+%Y-%m-%d')"
+          # 外部提交（人工 / dependabot / 其他 bot）可能已推进远端，
+          # 单次 pull --rebase 失败会让本周心跳白跑。
+          BRANCH="${GITHUB_REF_NAME:-main}"
+          for i in 1 2 3; do
+            if git push origin "HEAD:$BRANCH"; then
+              echo "已推送（第 $i 次尝试）"
+              exit 0
+            fi
+            echo "::warning::推送失败（第 $i 次），rebase 后重试"
+            git pull --rebase --autostash origin "$BRANCH" || { git rebase --abort 2>/dev/null || true; }
+            sleep $((i * 2))
+          done
+          echo "::error::连续 3 次推送失败，本周心跳未入库"
+          exit 1

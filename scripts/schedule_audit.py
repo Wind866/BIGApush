@@ -12,9 +12,15 @@
 
 覆盖范围说明
 ------------
-Actions 内置 GITHUB_TOKEN 只能读本仓库。要核对另外两个仓库（尤其私有的
-etf-feishu-push），需配置 Secret AUDIT_PAT（fine-grained PAT，Actions: read）。
-未覆盖的仓库一律标「⬜ 未覆盖」而**不判失败**，避免把「查不到」误报成「没跑」。
+Actions 内置 GITHUB_TOKEN 只能读本仓库。另外两个仓库（etf-feishu-push /
+limit-up-relay）都是**公开仓库**，可以匿名读 Actions 记录（60 次/小时，
+9 个档期够用），所以未配 AUDIT_PAT 时不再整段放弃，而是自动降级为匿名查询：
+
+  * 本仓库          → GITHUB_TOKEN
+  * 其他公开仓库    → AUDIT_PAT（若配置）> 匿名
+  * 私有仓库        → 必须有 AUDIT_PAT，否则标「⬜ 未覆盖」而不判失败
+
+仍然区分「查不到」和「没跑」：查询失败只标未覆盖，绝不判成漏跑。
 
 用法：
     python scripts/schedule_audit.py                 # 今天（北京时间）
@@ -75,12 +81,16 @@ def due_today(slot: dict, dow_js: int) -> bool:
 
 
 def api_get(path: str, token: str) -> dict:
-    req = urllib.request.Request(API + path, headers={
-        "Authorization": f"Bearer {token}",
+    headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "schedule-audit",
-    })
+    }
+    # token 为空时走匿名请求：公开仓库的 Actions 记录本来就能匿名读，
+    # 只是限额 60 次/小时（本脚本一次对账 9 个档期，够用）。
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(API + path, headers=headers)
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.load(resp)
 
@@ -101,10 +111,13 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
         for target in slot["targets"]:
             repo, workflow = target.split("/", 1)
             full_repo = f"{OWNER}/{repo}"
+            # 本仓库用内置 token；其他仓库优先 AUDIT_PAT，没有就匿名读
+            # （公开仓库读 Actions 不需要鉴权，旧逻辑在这里直接放弃，
+            #  于是 etf / relay 的档期长期挂着「⬜ 未覆盖」，漏跑根本发现不了）。
             token = pat or (builtin if full_repo == this_repo else "")
             row = {
                 "slot": slot["at"], "name": slot["name"], "target": target,
-                "due": due, "covered": bool(token), "actual": "—",
+                "due": due, "covered": True, "actual": "—",
                 "delay": "—", "status": "", "note": "",
             }
             if not due:
@@ -114,11 +127,6 @@ def build_rows(day: str) -> tuple[list[dict], int, int]:
             # 计划时刻还没到（白天查 22:13 的档期）不能算「未到」，否则对账天天报假警
             if planned > datetime.now(BJ):
                 row["status"] = "⏳ 未到时刻"
-                rows.append(row)
-                continue
-            if not token:
-                row["status"] = "⬜ 未覆盖"
-                row["note"] = "需配置 AUDIT_PAT 才能读此仓库的 Actions 记录"
                 rows.append(row)
                 continue
             covered += 1
@@ -206,8 +214,8 @@ def render(rows: list[dict], day: str, expected: int, covered: int) -> str:
         f"- 当日应到：**{expected}** 个目标 · 可核对：**{covered}** 个",
         f"- 实到（推送成功）：**{arrived}** · 未到或未成功：**{missing}** · 运行中：**{running}**",
         f"- 未覆盖：**{sum(1 for r in rows if r['status'].startswith('⬜') and r['due'])}** 个档期"
-        "（缺 `AUDIT_PAT` 或私有仓库无权限）—— **这些档期的漏跑本次根本不会被发现**",
-        "- 档期表来源：`cloudflare/worker.js` 的 `PLAN`；「⬜ 未覆盖」表示缺 `AUDIT_PAT`，不代表任务没跑",
+        "（私有仓库缺 `AUDIT_PAT` 或 API 查询失败）—— **这些档期的漏跑本次根本不会被发现**",
+        "- 档期表来源：`cloudflare/worker.js` 的 `PLAN`；公开仓库未配 `AUDIT_PAT` 时自动匿名查询",
         "",
         "| 档期 | 任务 | 目标 | 实到 | 偏差 | 结论 |",
         "| --- | --- | --- | --- | --- | --- |",

@@ -36,12 +36,25 @@ slot_hour 仍然向后兼容：不传时退回 cutoff_hour 行为。
 台账读不到、写不了、token 缺失、API 抖动，都**不阻断推送**，也**不跳过推送**。
 宁可偶尔重复一条，也不能因为守卫本身出问题导致当天没有消息。
 
+## 为什么这里仍然走 Contents API（与 limit-up-relay 不同）
+
+limit-up-relay / etf 已经改成「本地文件台账 + 与数据快照同一次 commit」，因为
+那边每天都要提交 docs/data、data/snapshots，Contents API 抢先产生 commit 会让
+紧接着的 ``git push`` 变成 non-fast-forward，进而把 Pages 部署整段 skip 掉。
+
+本仓库没有「每天提交数据」的步骤：快照只留在 runner 上、不入库，唯一的写入方
+是每周一次的 keep-alive，而它本身就带 ``git pull --rebase`` 重试，所以那条
+non-fast-forward 路径在这里不会发生。改成本地台账反而要求四个工作流各加一段
+提交步骤（漏一个就退化成「每天重复推送」），因此这里保持 API 台账，
+只在真出现「数据提交」需求时再一并迁移。
+
 ## 环境变量
 
   GITHUB_TOKEN / GH_TOKEN   Actions 内置 token（workflow 需 contents: write）
   GITHUB_REPOSITORY         Actions 自动注入，形如 owner/repo
   GITHUB_RUN_ID             Actions 自动注入，仅用于台账留痕
   FORCE_PUSH=1              强制跳过检查（手动重推用）
+  PUSH_GUARD_DATE           跨夜补跑时显式指定「数据日期」YYYY-MM-DD（档期按它算）
   PUSH_GUARD_DISABLE=1      完全关闭守卫（应急）
 """
 
@@ -67,13 +80,33 @@ __all__ = [
     "already_pushed", "DEFAULT_CUTOFF_HOUR",
 ]
 
+def _edition_override() -> date | None:
+    """PUSH_GUARD_DATE=YYYY-MM-DD：用「数据日期」而不是「运行时刻」归档期。
+
+    收盘定稿档 15:43 被 GitHub 拖到次日凌晨才起来时，数据仍是上一交易日的。
+    按运行时刻算档期会落到新的一天，和当天真正推过的记录对不上 → 同一份
+    数据被重复推送一条。跨夜补跑由 workflow 把行情日期传进来即可对齐。
+    """
+    raw = (os.environ.get("PUSH_GUARD_DATE") or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        print(f"[幂等] PUSH_GUARD_DATE 格式非法（{raw}），已忽略，按运行时刻归档期")
+        return None
+
+
 def edition_date(moment: datetime | None = None, cutoff_hour: int = DEFAULT_CUTOFF_HOUR,
                  slot_hour: int | None = None) -> date:
     """把实际运行时刻归到它所属的推送档期。
 
     slot_hour 给了就按「目标档期小时」归并（推荐）：运行时刻 − slot_hour 小时。
-    否则退回旧的「− cutoff_hour」行为。
+    否则退回旧的「− cutoff_hour」行为。PUSH_GUARD_DATE 显式指定时以它为准。
     """
+    override = _edition_override()
+    if override is not None:
+        return override
     moment = moment or datetime.now(BJ_TZ)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=BJ_TZ)

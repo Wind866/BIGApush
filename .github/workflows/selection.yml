@@ -46,17 +46,36 @@ jobs:
     # 现在让 step 级超时先触发（属于 failure，告警与缓存保存都会执行）。
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
           cache: 'pip'
 
       # 纯标准库，可在装依赖前运行；用行情时间戳识别节假日
+      # --catchup：15:43 的档期被调度延迟拖到次日凌晨时，行情日期必然是昨天。
+      # 旧版直接判「非交易日」静默退出，当天收盘定稿永久丢失；带 --catchup 后
+      # 改按「上一交易日的数据补跑」，台账再按该数据日期判重，不会重复刷屏。
       - name: 交易日预检
         id: trading
-        run: python intraday_selection.py --check-trading-day
+        run: python intraday_selection.py --check-trading-day --catchup
+
+      # 把「数据日期」显式传给后面的步骤：补跑时它 != 今天，
+      # 台账（PUSH_GUARD_DATE）与数据更新策略都要按它走。
+      - name: 判定本次口径（正常 / 跨夜补跑）
+        id: session
+        if: steps.trading.outputs.is_trading == 'true'
+        env:
+          DATA_DATE: ${{ steps.trading.outputs.data_date }}
+          CATCHUP: ${{ steps.trading.outputs.catchup }}
+        run: |
+          TODAY=$(TZ=Asia/Shanghai date +%F)
+          if [ "$CATCHUP" = "true" ]; then
+            echo "::warning::跨夜补跑：本次按 ${DATA_DATE} 的数据出收盘定稿（台账同按该日期判重）"
+          fi
+          echo "data_date=${DATA_DATE:-$TODAY}" >> "$GITHUB_OUTPUT"
+          echo "catchup=${CATCHUP:-false}" >> "$GITHUB_OUTPUT"
 
       - name: 调度延迟检查（仅提示，不阻断）
         if: github.event_name == 'schedule'
@@ -129,10 +148,23 @@ jobs:
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
+          # 跨夜补跑时数据日期是上一交易日，台账必须按它判重，否则同一份数据
+          # 会因为在次日凌晨运行而被算成新档期，重复推一条。
+          PUSH_GUARD_DATE: ${{ steps.session.outputs.data_date }}
           # 冷启动（库不存在）刚跑完 init，数据已是最新；再走一遍增量更新纯属重复耗时，
           # 而且正是它把冷启动推到 150 分钟上限之外。
-          SKIP_DATA_UPDATE: ${{ (inputs.skip_update || steps.check-db.outputs.exists == 'false') && '1' || '0' }}
-        run: python main.py run
+          # 补跑同理：上一交易日的 K 线早已入库，凌晨再抓一遍只是白烧 Actions 额度。
+          SKIP_DATA_UPDATE: ${{ (inputs.skip_update || steps.check-db.outputs.exists == 'false' || steps.session.outputs.catchup == 'true') && '1' || '0' }}
+          CATCHUP: ${{ steps.session.outputs.catchup }}
+          SESSION_DATE: ${{ steps.session.outputs.data_date }}
+        run: |
+          if [ "$CATCHUP" = "true" ]; then
+            # 补跑时运行日可能已是周末/次日，main.py 自带的交易日闸门会直接退出，
+            # 用包装脚本只放行闸门，选股与推送逻辑一行不动。
+            python scripts/run_close_catchup.py
+          else
+            python main.py run
+          fi
         # 实测最长 51.9 分钟（数据更新 30 分 + 选股推送 20 分），原来 55 分只剩 3 分余量，
         # 数据源一慢就整档被砍；提到 75 分（job 150 分内，仍留 20 分给收尾与推送）
         timeout-minutes: 75

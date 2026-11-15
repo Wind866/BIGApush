@@ -92,23 +92,61 @@ def fetch_index_timestamp() -> int:
     return ts
 
 
-def check_trading_day() -> tuple[bool, str]:
+MARKET_OPEN_HHMM = 9 * 60 + 15   # 集合竞价开始；此前 A 股不可能产生当日行情
+CATCHUP_MAX_GAP_DAYS = 4         # 补跑最多回溯几个自然日（长假 + 周末）
+
+
+def trading_session(now: datetime | None = None,
+                    allow_catchup: bool = False) -> tuple[bool, str, str | None]:
+    """判断本次运行该不该跑，并给出「数据日期」。
+
+    返回 (是否继续, 说明, 数据日期 YYYY-MM-DD 或 None)。
+
+    要点是区分「运行日期」和「数据日期」。旧实现只比较 `行情日期 == 今天`，
+    于是 15:43 的收盘定稿档一旦被 GitHub 拖到次日凌晨（实测延迟 3.3~9.7
+    小时），行情日期必然是昨天 → 判成「非交易日」→ 静默退出，当天收盘选股
+    永久丢失，深夜兜底档等于白铺。
+
+    盘前（09:15 之前）与周末运行的「运行日」不可能是数据日，此时：
+
+      * allow_catchup=False（盘中档）：返回 False —— 凌晨推「盘中快照」
+        只会误导，不如不推；
+      * allow_catchup=True（收盘定稿档）：允许按上一交易日补跑，数据日期取
+        行情时间戳那一天，台账再按该日期判重，不会重复刷屏。
     """
-    返回 (是否交易日, 说明)。
-    先用周末规则快速排除，再用行情时间戳的北京日期比对识别法定节假日。
-    指数日历全部失效时保守放行（只按周末规则），避免网络波动导致漏跑。
-    """
-    bj = now_bj()
-    if bj.weekday() >= 5:
-        return False, f"{bj:%Y-%m-%d} 为周末"
+    bj = now or now_bj()
+    pre_open = bj.weekday() >= 5 or bj.hour * 60 + bj.minute < MARKET_OPEN_HHMM
+    today_txt = bj.date().isoformat()
     try:
         ts = fetch_index_timestamp()
-        quote_day = datetime.fromtimestamp(ts, BJ_TZ).date()
-        if quote_day != bj.date():
-            return False, f"行情最新日期 {quote_day}，今日 {bj.date()} 非交易日（节假日或休市）"
-        return True, f"行情时间戳 {datetime.fromtimestamp(ts, BJ_TZ):%Y-%m-%d %H:%M:%S} 为当日"
     except Exception as exc:  # noqa: BLE001
-        return True, f"交易日历接口全部不可用（{type(exc).__name__}），按周末规则放行"
+        # 指数日历全部失效时保守放行（只按周末规则），避免网络波动导致漏跑。
+        # 但盘前/周末连「现在是哪一天的数据」都无从判断，硬跑只会把昨天的数据
+        # 记成今天的定稿，所以这一种情况仍然跳过。
+        if pre_open:
+            return (False,
+                    f"交易日历接口全部不可用（{type(exc).__name__}），且当前是盘前/周末，"
+                    "无法确认数据日期，跳过", None)
+        return True, f"交易日历接口全部不可用（{type(exc).__name__}），按周末规则放行", today_txt
+
+    quote_dt = datetime.fromtimestamp(ts, BJ_TZ)
+    quote_day = quote_dt.date()
+    if quote_day == bj.date():
+        return True, f"行情时间戳 {quote_dt:%Y-%m-%d %H:%M:%S} 为当日", today_txt
+
+    gap = (bj.date() - quote_day).days
+    if allow_catchup and pre_open and 1 <= gap <= CATCHUP_MAX_GAP_DAYS:
+        return (True,
+                f"跨夜补跑：运行 {bj:%Y-%m-%d %H:%M}（盘前/周末），行情最新 {quote_day}，"
+                f"按上一交易日补跑收盘定稿（相隔 {gap} 天）",
+                quote_day.isoformat())
+    return False, f"行情最新日期 {quote_day}，今日 {bj.date()} 非交易日（节假日或休市）", None
+
+
+def check_trading_day(allow_catchup: bool = False) -> tuple[bool, str]:
+    """兼容旧签名：只返回是否继续，丢弃数据日期。"""
+    ok, reason, _ = trading_session(allow_catchup=allow_catchup)
+    return ok, reason
 
 
 def fetch_market_snapshot():
@@ -572,13 +610,20 @@ def push(payload: dict, fallback: str, webhook: str) -> bool:
         return False
 
 
-def emit_github_output(is_trading: bool) -> None:
+def emit_github_output(is_trading: bool, data_date: str | None = None) -> None:
+    """把结论写给 workflow。data_date 是「数据日期」，跨夜补跑时 != 今天。"""
+    today = now_bj().date().isoformat()
+    session = data_date or today
+    lines = [
+        f"is_trading={'true' if is_trading else 'false'}",
+        f"data_date={session}",
+        f"catchup={'true' if session != today else 'false'}",
+    ]
     out = os.environ.get("GITHUB_OUTPUT")
-    line = f"is_trading={'true' if is_trading else 'false'}"
     if out:
         with open(out, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    print(line)
+            f.write("\n".join(lines) + "\n")
+    print(" | ".join(lines))
 
 
 LATE_GRACE_MINUTES = 20          # 超过该延迟才提示
@@ -600,13 +645,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="盘中选股观察池（13:13）")
     ap.add_argument("--dry-run", action="store_true", help="本地试跑，不推送飞书")
     ap.add_argument("--check-trading-day", action="store_true", help="仅检查交易日并输出给 GitHub Actions")
+    ap.add_argument("--catchup", action="store_true",
+                    help="允许跨夜补跑：盘前/周末按上一交易日的数据补跑收盘定稿（收盘选股用）")
     ap.add_argument("--json", action="store_true", help="打印完整观察池 JSON（调试用）")
     args = ap.parse_args()
 
-    ok, reason = check_trading_day()
+    ok, reason, data_date = trading_session(allow_catchup=args.catchup)
     print(f"[交易日判断] {ok} · {reason}")
     if args.check_trading_day:
-        emit_github_output(ok)
+        emit_github_output(ok, data_date)
         return 0
     if not ok:
         print("非交易日，跳过盘中选股与推送")

@@ -59,7 +59,9 @@ const API = "https://api.github.com";
 // 不同步（缺 /test 路由、档期名不一致），靠肉眼看代码无法发现。
 // 2026-11-15.1：notify() 支持飞书加签 + 校验业务码（19021），/health 增加
 // alertSignSupported / alertSecretConfigured，便于一次确认线上是否为新版。
-const BUILD = "2026-11-15.1";
+// 2026-11-15.2：PLAN 增加 23:30 档期对账；双档 workflow 显式传 expect_hhmm；
+// GH_TOKEN 到期前 7 天开始预警；/health 暴露 tokenExpiration。
+const BUILD = "2026-11-15.2";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -93,6 +95,12 @@ const PLAN = [
     targets: ["BIGApush/evening-news.yml"],
   },
   {
+    // 对账本身也曾只靠 GitHub cron：延迟到次日就对错了日期，等于监控自己被打瞎。
+    // 交给 Worker 准点触发，脚本里仍保留「12 点前回看前一天」的兜底。
+    at: "23:30", days: "all", name: "档期对账 · 应到/实到",
+    targets: ["BIGApush/schedule-audit.yml"],
+  },
+  {
     at: "09:00", days: 1, name: "数据源健康自检（周一）",
     targets: ["BIGApush/check-sources.yml", "limit-up-relay/check-sources.yml"],
   },
@@ -101,6 +109,15 @@ const PLAN = [
     targets: ["BIGApush/keep-alive.yml"],
   },
 ];
+
+// 13:07 / 15:37 两个档期共用 limit-up-relay/daily.yml。若不显式带上档期，
+// 该 workflow 只能按「实际运行时刻取最接近的档期」猜；Actions 排队一久就会把
+// 13:07 的盘中快照记成 15:37，台账随后把真正的收盘定稿判成重复而跳过。
+// 这里按白名单给需要的工作流注入 inputs，其余工作流仍不传（API 会拒绝
+// 未在 workflow 里声明的 input）。
+const SLOT_INPUTS = {
+  "limit-up-relay/daily.yml": (slot) => ({ expect_hhmm: slot.at.replace(":", "") }),
+};
 
 const GH_HEADERS = (token) => ({
   Authorization: `Bearer ${token}`,
@@ -213,12 +230,13 @@ async function dispatchOne(env, headers, owner, branch, target, slot) {
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
+      const inputs = SLOT_INPUTS[target] ? SLOT_INPUTS[target](slot) : null;
       const res = await fetch(url, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
-        // 不传 inputs：未在 workflow 里声明的 input 会被 API 拒绝，
-        // 各 workflow 的默认值已经足够（normal / close / main）。
-        body: JSON.stringify({ ref: branch }),
+        // 默认不传 inputs：未在 workflow 里声明的 input 会被 API 拒绝。
+        // 只有 SLOT_INPUTS 白名单里的双档工作流才带档期号，其余用默认值。
+        body: JSON.stringify(inputs ? { ref: branch, inputs } : { ref: branch }),
       });
       if (res.status === 204) {
         return `✅ ${target} (${slot.name}) 已触发`;
@@ -318,21 +336,38 @@ async function catchUp(env, bj) {
   }
 }
 
-/** 每天 08:00 主动验一次 token，避免 PAT 过期后「静默不推」好几天才发现 */
+/** 每天 08:00 主动验一次 token；成功时也计算剩余天数，提前 7 天开始预警。
+ *  旧版只在 PAT 已经失效后才告警，等于「过期当天才发现」——而过期的后果是
+ *  全部档期失去准点触发，只剩延迟数小时的 GitHub cron 兜底。 */
 async function tokenSelfCheck(env) {
   try {
     const headers = await authHeaders(env);
     const res = await fetch(`${API}/user`, { headers });
-    if (res.ok) {
-      console.log("[SELF-CHECK] GH_TOKEN 有效");
+    const exp = res.headers.get("github-authentication-token-expiration");
+    if (!res.ok) {
+      await notify(
+        env,
+        `GH_TOKEN 自检失败 HTTP ${res.status}${exp ? `（过期时间 ${exp}）` : ""}。` +
+          `请到 GitHub Settings → Developer settings 轮换 PAT，并用 wrangler secret put GH_TOKEN 更新。`,
+      );
       return;
     }
-    const exp = res.headers.get("github-authentication-token-expiration");
-    await notify(
-      env,
-      `GH_TOKEN 自检失败 HTTP ${res.status}${exp ? `（过期时间 ${exp}）` : ""}。` +
-        `请到 GitHub Settings → Developer settings 轮换 PAT，并用 wrangler secret put GH_TOKEN 更新。`,
-    );
+    console.log("[SELF-CHECK] GH_TOKEN 有效");
+    if (exp) {
+      const until = Date.parse(exp);
+      if (!Number.isNaN(until)) {
+        const days = Math.max(0, Math.floor((until - Date.now()) / 86400000));
+        if (days <= 7) {
+          await notify(
+            env,
+            `GH_TOKEN 将在 ${days} 天内过期（${exp}）。请提前轮换 PAT 并用 ` +
+              `wrangler secret put GH_TOKEN 更新；过期后所有档期都会失去准点触发。`,
+          );
+        } else {
+          console.log(`[SELF-CHECK] GH_TOKEN 距过期还有 ${days} 天`);
+        }
+      }
+    }
   } catch (err) {
     await notify(env, `GH_TOKEN 自检异常：${err}`);
   }
@@ -1180,11 +1215,13 @@ export default {
     if (url.pathname === "/health") {
       let tokenValid = null;
       let tokenScopes = null;
+      let tokenExpiration = null;
       if (url.searchParams.get("check") === "1") {
         try {
           const res = await fetch(`${API}/user`, { headers: await authHeaders(env) });
           tokenValid = res.ok;
           tokenScopes = res.headers.get("x-oauth-scopes") || (res.ok ? "(fine-grained, 无 scopes 头)" : "");
+          tokenExpiration = res.headers.get("github-authentication-token-expiration");
         } catch {
           tokenValid = false;
         }
@@ -1200,6 +1237,7 @@ export default {
         schedule: PLAN.map((s) => `${s.at} ${s.name} [${s.targets.length}]`),
         tokenValid,
         tokenScopes,
+        tokenExpiration,
         alertConfigured: Boolean((env.ALERT_WEBHOOK || "").trim()),
         // 本版代码是否已带加签能力（旧版没有这两个字段）；
         // 密钥没配且机器人开了加签时，告警仍会被 19021 拒掉。

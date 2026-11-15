@@ -4,11 +4,16 @@ name: 盘中选股
 # 分钟数避开 :00 / :30，并与 limit-up-relay 的 13:07 错开 6 分钟。
 # 准点由 Cloudflare Worker 触发；GitHub cron 只作兜底。
 # 迟到不再拦截推送（见脚本内说明），重复由台账幂等守卫负责。
+#
+# 兜底铺到 +6h（19:13）。盘中快照时效性强，再晚的数据参考价值很低，
+# 所以不像新闻类档期那样铺到 +10h；卡片会标注真实数据时点。
 on:
   schedule:
-    - cron: '13 5 * * 1-5'
-    - cron: '13 6 * * 1-5'
-    - cron: '13 7 * * 1-5'
+    - cron: '13 5 * * 1-5'    # 北京 13:13 主档
+    - cron: '13 6 * * 1-5'    # 14:13
+    - cron: '13 7 * * 1-5'    # 15:13
+    - cron: '13 9 * * 1-5'    # 17:13  (+4h)
+    - cron: '13 11 * * 1-5'   # 19:13  (+6h)
   workflow_dispatch:
     inputs:
       force:
@@ -38,6 +43,22 @@ jobs:
         with:
           python-version: '3.11'
 
+      # 补档按计划执行，不该被写成「主档迟到 60 分钟」而误导看卡片的人。
+      - name: 推导本档计划时刻
+        if: github.event_name == 'schedule'
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          case "$SCHEDULE" in
+            '13 5 * * 1-5')   planned="1313" ;;
+            '13 6 * * 1-5')   planned="1413" ;;
+            '13 7 * * 1-5')   planned="1513" ;;
+            '13 9 * * 1-5')   planned="1713" ;;
+            '13 11 * * 1-5')  planned="1913" ;;
+            *)                 planned="1313" ;;
+          esac
+          echo "EXPECT_HHMM=$planned" >> "$GITHUB_ENV"
+
       - name: 交易日预检
         id: trading
         run: python intraday_selection.py --check-trading-day
@@ -47,8 +68,8 @@ jobs:
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          # 计划时刻仅用于卡片标注，不再用于拦截推送
-          EXPECT_HHMM: "${{ github.event_name == 'schedule' && '1313' || '' }}"
+          # EXPECT_HHMM 由「推导本档计划时刻」写入 GITHUB_ENV；只用于卡片标注，
+          # 不用于拦截推送，也不参与台账判重（台账按 slot_hour=13 归并）。
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
         run: python intraday_selection.py

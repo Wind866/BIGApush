@@ -4,11 +4,18 @@ name: 早间新闻
 # 准点由 Cloudflare Worker（见 cloudflare/README.md）workflow_dispatch；
 # 下面的 cron 只作兜底 —— GitHub schedule 实测可晚数小时甚至丢弃档期。
 # 两个触发器不会重复推送：daily_news.py 先过 utils/push_guard.py 台账守卫。
+#
+# 兜底窗口按实测延迟铺到 +10 小时（08:43 → 18:43）。原来只铺到 +2 小时，
+# 而本账号 schedule 实测延迟 3.3~9.7 小时，真正会跑的时刻根本没有任何 cron
+# 档位，等于 Worker 一失效就彻底漏档。台账按档期判重，多铺的档位不会刷屏。
 on:
   schedule:
-    - cron: '43 0 * * *'
-    - cron: '43 1 * * *'
-    - cron: '43 2 * * *'
+    - cron: '43 0 * * *'    # 北京 08:43 主档
+    - cron: '43 1 * * *'    # 09:43
+    - cron: '43 2 * * *'    # 10:43
+    - cron: '43 4 * * *'    # 12:43  (+4h)
+    - cron: '43 7 * * *'    # 15:43  (+7h)
+    - cron: '43 10 * * *'   # 18:43  (+10h)
   workflow_dispatch:
     inputs:
       force:
@@ -41,12 +48,30 @@ jobs:
 
       - run: pip install requests
 
+      # 补档是按计划执行的，不该被标成「主档迟到 60 分钟」。
+      # 用 github.event.schedule 精确映射本档计划时刻，写入 GITHUB_ENV 供推送脚本
+      # 标注数据时点；手动 dispatch 时本步跳过，脚本不做延迟判定。
+      - name: 推导本档计划时刻
+        if: github.event_name == 'schedule'
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          case "$SCHEDULE" in
+            '43 0 * * *')   planned="0843" ;;
+            '43 1 * * *')   planned="0943" ;;
+            '43 2 * * *')   planned="1043" ;;
+            '43 4 * * *')   planned="1243" ;;
+            '43 7 * * *')   planned="1543" ;;
+            '43 10 * * *')  planned="1843" ;;
+            *)              planned="0843" ;;
+          esac
+          echo "EXPECT_HHMM=$planned" >> "$GITHUB_ENV"
+
       - name: 推送早间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          # 仅 schedule 触发时标注计划时刻；手动 dispatch 是"我现在就要结果"
-          EXPECT_HHMM: "${{ github.event_name == 'schedule' && '0843' || '' }}"
+          # EXPECT_HHMM 由上一步写入 GITHUB_ENV；手动 dispatch 时不设置
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
         run: python daily_news.py

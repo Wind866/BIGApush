@@ -3,10 +3,17 @@ name: 收盘选股
 # 北京时间 = UTC+8。15:43 收盘定稿（周一至周五），节假日由交易日预检跳过。
 # 分钟数与 limit-up-relay 的 15:37 错开 6 分钟，避开整点拥堵。
 # 准点由 Cloudflare Worker 触发；GitHub cron 只作兜底。
+#
+# 收盘数据当天夜里仍有参考价值，兜底铺到 23:43（+8h）；原来只有 +1h，
+# 而实测延迟 3.3~9.7 小时，兜底基本接不住。台账按 slot_hour=15 判重，
+# 多档触发会被秒级跳过。
 on:
   schedule:
-    - cron: '43 7 * * 1-5'
-    - cron: '43 8 * * 1-5'
+    - cron: '43 7 * * 1-5'    # 北京 15:43 主档
+    - cron: '43 8 * * 1-5'    # 16:43
+    - cron: '43 10 * * 1-5'   # 18:43  (+3h)
+    - cron: '43 13 * * 1-5'   # 21:43  (+6h)
+    - cron: '43 15 * * 1-5'   # 23:43  (+8h)
   workflow_dispatch:
     inputs:
       skip_update:
@@ -53,15 +60,27 @@ jobs:
 
       - name: 调度延迟检查（仅提示，不阻断）
         if: github.event_name == 'schedule'
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
-          planned=$(date -d "today 15:43" +%s)
+          # 每条 cron 都是自己的计划时刻；旧版写死 15:43，会把 16:43 的
+          # 正常补档误报成「比计划晚 60 分钟」。
+          case "$SCHEDULE" in
+            '43 7 * * 1-5')   plan="15:43" ;;
+            '43 8 * * 1-5')   plan="16:43" ;;
+            '43 10 * * 1-5')  plan="18:43" ;;
+            '43 13 * * 1-5')  plan="21:43" ;;
+            '43 15 * * 1-5')  plan="23:43" ;;
+            *)                 plan="15:43" ;;
+          esac
+          planned=$(date -d "today $plan" +%s)
           late=$(( ( $(date +%s) - planned ) / 60 ))
           if [ "$late" -lt 0 ]; then late=$(( late + 1440 )); fi
           if [ "$late" -ge 30 ]; then
-            echo "::warning::比计划（北京 15:43）晚 $late 分钟，属 GitHub 调度延迟"
-            echo "### ⚠️ 调度延迟 $late 分钟" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::比计划（北京 $plan）晚 $late 分钟，属 GitHub 调度延迟"
+            echo "### ⚠️ 调度延迟 $late 分钟（计划 $plan）" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "准点运行（偏差 ${late} 分钟）"
+            echo "准点运行（偏差 ${late} 分钟，计划 $plan）"
           fi
 
       - name: 安装依赖

@@ -3,11 +3,18 @@ name: 晚间新闻
 # 北京时间 = UTC+8，每天 22:13 推送收盘总结与晚间要闻。
 # 准点由 Cloudflare Worker 在 22:13 workflow_dispatch；下面的 cron 仅作兜底
 # （实测 0/34 准时，延迟 3h17m~9h43m）。脚本侧有台账幂等守卫，不会重复推送。
+#
+# 兜底窗口铺到次日 08:13（+10h）：晚间档常跨午夜才到，原来只到 +2h，
+# 真正在跑的时刻没有任何 cron 档位。台账按 slot_hour=22 归并跨日档期，
+# 补跑不会占用第二天的晚间档，也不会重复刷屏。
 on:
   schedule:
-    - cron: '13 14 * * *'
-    - cron: '13 15 * * *'
-    - cron: '13 16 * * *'
+    - cron: '13 14 * * *'   # 北京 22:13 主档
+    - cron: '13 15 * * *'   # 23:13
+    - cron: '13 16 * * *'   # 次日 00:13
+    - cron: '13 18 * * *'   # 次日 02:13  (+4h)
+    - cron: '13 21 * * *'   # 次日 05:13  (+7h)
+    - cron: '13 0 * * *'    # 北京 08:13   (+10h)
   workflow_dispatch:
     inputs:
       force:
@@ -41,11 +48,29 @@ jobs:
 
       - run: pip install requests
 
+      # 补档按计划跑，不该被标成「主档迟到」。跨午夜的档期对应次日 HHMM，
+      # 与 push_guard 的 slot_hour=22 档期归并互不干扰（台账不看 EXPECT_HHMM）。
+      - name: 推导本档计划时刻
+        if: github.event_name == 'schedule'
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          case "$SCHEDULE" in
+            '13 14 * * *')  planned="2213" ;;
+            '13 15 * * *')  planned="2313" ;;
+            '13 16 * * *')  planned="0013" ;;
+            '13 18 * * *')  planned="0213" ;;
+            '13 21 * * *')  planned="0513" ;;
+            '13 0 * * *')   planned="0813" ;;
+            *)              planned="2213" ;;
+          esac
+          echo "EXPECT_HHMM=$planned" >> "$GITHUB_ENV"
+
       - name: 推送晚间新闻
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          EXPECT_HHMM: "${{ github.event_name == 'schedule' && '2213' || '' }}"
+          # EXPECT_HHMM 由上一步写入 GITHUB_ENV
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           FORCE_PUSH: ${{ inputs.force && '1' || '' }}
         run: python evening_news.py

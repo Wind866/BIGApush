@@ -72,7 +72,7 @@ def send_feishu(msg):
         print(f"❌ 飞书推送异常：{type(exc).__name__} {exc}")
         return False
     if not fw.response_ok(result):
-        print(f"❌ 飞书返回错误：{result}")
+        print(f"❌ 飞书返回错误：{result}{fw.describe_rejection(result)}")
         return False
     return True
 

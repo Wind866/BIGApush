@@ -40,10 +40,24 @@ from typing import Any
 __all__ = [
     "gen_sign", "sign_payload", "post_json", "response_ok",
     "send_text", "send_payload", "resolve_credentials", "alert_text",
+    "describe_rejection", "SIGN_HINT",
 ]
 
 # 飞书自定义机器人业务码：0 / 缺失 视为成功；19021 加签失败；19024 关键词校验失败
 SIGN_ERROR_CODE = 19021
+SIGN_HINT = "19021 = 机器人开启了加签，但 FEISHU_SECRET / ALERT_SECRET 为空或不对"
+
+
+def describe_rejection(result: Any) -> str:
+    """把飞书业务码翻成一句能直接照做的提示；非加签错误返回空串。
+
+    调用方拿到的 ``result`` 是飞书原样返回的 JSON，``{"code":19021}`` 单看
+    完全看不出「要去配密钥」，所以把这层翻译集中在这里，业务脚本只负责拼接。
+    """
+    if not isinstance(result, dict):
+        return ""
+    code = result.get("code", result.get("StatusCode"))
+    return f"（{SIGN_HINT}）" if code in (SIGN_ERROR_CODE, str(SIGN_ERROR_CODE)) else ""
 
 
 def gen_sign(secret: str, timestamp: str) -> str:
@@ -154,8 +168,5 @@ def alert_text(text: str, alert: bool = True, timeout: float = 12) -> tuple[bool
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
     if not response_ok(result):
-        code = result.get("code", result.get("StatusCode")) if isinstance(result, dict) else "?"
-        hint = "（19021 = 机器人开启了加签，请配置 FEISHU_SECRET / ALERT_SECRET）" \
-            if code == SIGN_ERROR_CODE else ""
-        return False, f"飞书拒绝受理：{result}{hint}"
+        return False, f"飞书拒绝受理：{result}{describe_rejection(result)}"
     return True, "已发送"

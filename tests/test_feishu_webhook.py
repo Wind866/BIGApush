@@ -192,5 +192,53 @@ class TestWorkflowStaticGuards(unittest.TestCase):
         self.assertIn("paths:", src)
 
 
+class TestSignHintAndPreflight(unittest.TestCase):
+    """加签缺失时「静默哑掉」的两处兜底：错误翻译与凭据体检。"""
+
+    @staticmethod
+    def _alert_module():
+        import importlib.util
+        path = os.path.join(ROOT, "scripts", "alert.py")
+        spec = importlib.util.spec_from_file_location("_alert_mod", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_19021_is_translated_into_actionable_hint(self):
+        hint = fw.describe_rejection({"code": 19021, "msg": "sign fail"})
+        self.assertIn("19021", hint)
+        self.assertIn("FEISHU_SECRET", hint)
+        self.assertIn("ALERT_SECRET", hint)
+
+    def test_other_codes_produce_no_hint(self):
+        for result in ({"code": 0}, {"code": 19024}, {"StatusCode": 1}, None, "ok"):
+            self.assertEqual(fw.describe_rejection(result), "", result)
+
+    def test_preflight_fails_when_no_webhook(self):
+        alert = self._alert_module()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(alert.check_env(), 1)
+
+    def test_preflight_warns_on_missing_secret_without_echoing_url(self):
+        import contextlib
+        alert = self._alert_module()
+        buf = io.StringIO()
+        env = {"FEISHU_WEBHOOK": "https://open.feishu.cn/hook/secret-url"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             contextlib.redirect_stdout(buf):
+            self.assertEqual(alert.check_env(), 0)
+        out = buf.getvalue()
+        self.assertIn("19021", out)
+        # 体检输出不许回显 webhook 地址，否则日志里又是一份明文凭据
+        self.assertNotIn("secret-url", out)
+
+    def test_composite_action_surfaces_send_failure(self):
+        """告警发不出去时这个 step 必须判红，不能 `|| echo` 吞掉。"""
+        path = os.path.join(ROOT, ".github/actions/alert/action.yml")
+        action = open(path, encoding="utf-8").read()
+        self.assertNotIn("|| echo", action)
+        self.assertIn("exit 1", action)
+
+
 if __name__ == "__main__":
     unittest.main()

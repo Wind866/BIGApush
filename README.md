@@ -140,6 +140,18 @@ FEISHU_WEBHOOK=https://... python intraday_selection.py   # 实推一次
 | `ALERT_WEBHOOK` | 独立告警机器人，避免业务 webhook 故障时告警一起哑掉 |
 | `ALERT_SECRET` | 告警机器人的加签密钥，未配时回落 `FEISHU_SECRET` |
 
+> **加签要么两个机器人都开，要么都不开。** 只开一半的后果不是「部分失效」而是全链路静默：
+> 业务推送被拒（`19021`，HTTP 仍 200）→ 触发 `if: failure()` 告警 → 告警机器人同样要求
+> 加签 → 告警也发不出去。运行页只剩一条 error，群里一条消息都没有。
+>
+> 改完机器人设置先自查一次（只读环境变量、不发消息、不回显密钥）：
+> `python scripts/alert.py --check`
+
+```bash
+gh secret set FEISHU_SECRET --body '<业务机器人加签密钥>' --repo Wind866/BIGApush
+gh secret set ALERT_SECRET  --body '<告警机器人加签密钥>' --repo Wind866/BIGApush
+```
+
 > 旧版 7 个工作流的失败告警是裸 `curl` 发文本：不带 `sign` 字段，也不解析飞书
 > 响应体。机器人一旦开启加签，飞书返回 `{"code":19021}` 但 HTTP 仍是 200，
 > curl 会当成发送成功 —— 告警在最需要它的时候静默哑掉。现在业务推送与告警

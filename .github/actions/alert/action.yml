@@ -32,6 +32,10 @@ runs:
           echo "::error::找不到 python 解释器，告警未发送"
           exit 1
         fi
-        # 未配置任何 webhook 时 alert.py 自身打印并返回 0，不判红。
-        "$PY" "$GITHUB_WORKSPACE/scripts/alert.py" "$MESSAGE" --run-url "$RUN_URL" \
-          || echo "::error::告警发送失败（独立告警通道可能也失效）"
+        # 未配置任何 webhook 时 alert.py 自身打印并返回 0（没配就是不需要告警，不判红）。
+        # 但「配了却没发出去」必须让这个 step 判红：不加 exit 1 的话，
+        # 「任务失败 + 告警没发出去 + 页面全绿」这三重静默会一直藏着。
+        if ! "$PY" "$GITHUB_WORKSPACE/scripts/alert.py" "$MESSAGE" --run-url "$RUN_URL"; then
+          echo "::error::告警发送失败：告警通道本身不可用（业务 webhook 与告警 webhook 可能同时失效）"
+          exit 1
+        fi

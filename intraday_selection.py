@@ -596,14 +596,15 @@ def push(payload: dict, fallback: str, webhook: str) -> bool:
         if fw.response_ok(result):
             print("✅ 飞书交互卡片推送成功")
             return True
-        print(f"⚠️ 卡片推送被拒：{result}，降级为文本消息")
+        print(f"⚠️ 卡片推送被拒：{result}{fw.describe_rejection(result)}，降级为文本消息")
     except Exception as exc:  # noqa: BLE001
         print(f"⚠️ 卡片推送异常：{type(exc).__name__} {exc}，降级为文本消息")
 
     try:
         result = fw.send_text(hook, secret, fallback)
         ok = fw.response_ok(result)
-        print("✅ 文本消息推送成功" if ok else f"❌ 文本推送也被拒：{result}")
+        print("✅ 文本消息推送成功" if ok
+              else f"❌ 文本推送也被拒：{result}{fw.describe_rejection(result)}")
         return ok
     except Exception as exc:  # noqa: BLE001
         print(f"❌ 文本推送异常：{type(exc).__name__} {exc}")

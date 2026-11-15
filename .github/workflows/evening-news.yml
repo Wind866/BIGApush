@@ -46,7 +46,10 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - run: pip install requests
+      # 锁版本并加主版本上界（与 requirements.txt 的 requests>=2.31.0,<3 一致），
+      # 裸 pip install requests 会装到 breaking change 的新主版本；
+      # 新闻链路只需 requests，不必装整份 requirements.txt（含 akshare 等重依赖）。
+      - run: pip install "requests>=2.31.0,<3"
 
       # 补档按计划跑，不该被标成「主档迟到」。跨午夜的档期对应次日 HHMM，
       # 与 push_guard 的 slot_hour=22 档期归并互不干扰（台账不看 EXPECT_HHMM）。

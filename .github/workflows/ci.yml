@@ -140,24 +140,33 @@ jobs:
           fi
           echo "全部 Action 已固定到 commit SHA"
 
-      # 告警必须走 scripts/alert.py：裸 curl 不发 sign 字段、也不解析飞书业务码，
-      # 机器人开启加签后告警会静默哑掉（19021 但 HTTP 200）。
+      # 告警必须走 .github/actions/alert（内部调用 scripts/alert.py）：裸 curl 不发
+      # sign 字段、也不解析飞书业务码，机器人开启加签后告警会静默哑掉（19021 但 HTTP 200）。
       - name: 告警通道统一入口检查
         run: |
+          ACTION=.github/actions/alert/action.yml
+          if ! grep -q 'scripts/alert.py' "$ACTION"; then
+            echo "::error::复合告警动作没有复用 scripts/alert.py（加签与业务码校验会丢）"
+            exit 1
+          fi
           # 逐文件检查并跳过 ci.yml 自身：否则这条 grep 模式会匹配到自己
           # （脚本里写着 'curl ...$HOOK' 这个待检模式），门禁永远判红。
           for f in .github/workflows/*.yml; do
             if [ "$f" = ".github/workflows/ci.yml" ]; then continue; fi
             if grep -qE 'curl .*POST.*[$]HOOK' "$f"; then
-              echo "::error::$f 仍是裸 curl 告警，请改用 python scripts/alert.py"
+              echo "::error::$f 仍是裸 curl 告警，请改用 ./.github/actions/alert"
               exit 1
             fi
-            if grep -q 'if: failure()' "$f" && ! grep -q 'scripts/alert.py' "$f"; then
-              echo "::error::$f 有失败告警但未走统一入口"
+            if grep -q 'if: failure()' "$f" && ! grep -q '.github/actions/alert' "$f"; then
+              echo "::error::$f 有失败告警但未走统一入口 ./.github/actions/alert"
+              exit 1
+            fi
+            if grep -q 'python scripts/alert.py' "$f"; then
+              echo "::error::$f 仍在 workflow 里直连脚本，请改用 ./.github/actions/alert"
               exit 1
             fi
           done
-          echo "全部失败告警均走带签名的 scripts/alert.py"
+          echo "全部失败告警均走 ./.github/actions/alert（内部 scripts/alert.py，带签名）"
 
       # workflow_dispatch 的 inputs 绝不能插值进 run 脚本（表达式注入）。
       # 正确做法：env: 传入 + os.environ 读取，或先白名单清洗。

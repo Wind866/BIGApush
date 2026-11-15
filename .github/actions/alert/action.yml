@@ -1,0 +1,37 @@
+name: 飞书失败告警
+description: >-
+  统一告警出口：优先独立告警机器人（ALERT_WEBHOOK），缺失时回落到业务机器人
+  （FEISHU_WEBHOOK）。内部调用 scripts/alert.py，保留它的加签与飞书业务码校验
+  ——裸 curl 不发 sign、也不看 {"code":19021}，机器人一开加签就永久静默。
+
+  凭据必须在调用方的 workflow / step env 注入（composite 取不到 secrets 上下文）：
+    ALERT_WEBHOOK  ALERT_SECRET  FEISHU_WEBHOOK  FEISHU_SECRET
+
+inputs:
+  message:
+    description: 告警正文
+    required: true
+  run-url:
+    description: 本次运行的日志链接，会附在正文后面
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: 发送告警
+      shell: bash
+      env:
+        MESSAGE: ${{ inputs.message }}
+        RUN_URL: ${{ inputs.run-url }}
+        PYTHONIOENCODING: utf-8
+      run: |
+        # keep-alive 这类 job 没有 setup-python，runner 上可能是 python3 而非 python。
+        PY=$(command -v python || command -v python3)
+        if [ -z "$PY" ]; then
+          echo "::error::找不到 python 解释器，告警未发送"
+          exit 1
+        fi
+        # 未配置任何 webhook 时 alert.py 自身打印并返回 0，不判红。
+        "$PY" "$GITHUB_WORKSPACE/scripts/alert.py" "$MESSAGE" --run-url "$RUN_URL" \
+          || echo "::error::告警发送失败（独立告警通道可能也失效）"

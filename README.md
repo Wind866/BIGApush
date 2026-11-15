@@ -1,4 +1,4 @@
-# 缅A每日推送
+# A股自动化 · 选股 / 资讯 / 个股查询
 
 A股量化选股 + 每日自动推送系统，通过 GitHub Actions 全自动运行，结果推送到飞书群。
 
@@ -355,7 +355,7 @@ npx wrangler secret put ADMIN_TOKEN    # 自定义一个足够长的随机串
 ## 项目结构
 
 ```
-缅A每日推送/
+BIGApush/
 ├── main.py                  # 主程序入口（收盘选股）
 ├── intraday_selection.py    # 盘中选股（独立、纯标准库）
 ├── daily_news.py            # 早间新闻

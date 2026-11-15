@@ -143,11 +143,18 @@ class TestWorkflowStaticGuards(unittest.TestCase):
                 self.assertIsInstance(yaml.safe_load(fh), dict, path)
 
     def test_no_bare_curl_alert(self):
+        """失败告警走 ./.github/actions/alert，动作内部再复用带签名的 scripts/alert.py。"""
+        action = open(os.path.join(ROOT, ".github/actions/alert/action.yml"),
+                      encoding="utf-8").read()
+        self.assertIn("scripts/alert.py", action,
+                      "复合告警动作必须复用 alert.py，否则会丢加签与业务码校验")
         for path in glob.glob(os.path.join(ROOT, ".github/workflows/*.yml")):
             text = open(path, encoding="utf-8").read()
+            name = os.path.basename(path)
             if "if: failure()" in text:
-                self.assertIn("scripts/alert.py", text, os.path.basename(path))
-            self.assertNotIn('curl -sS -X POST "$HOOK"', text, os.path.basename(path))
+                self.assertIn("./.github/actions/alert", text,
+                              f"{name} 的失败告警没有走统一入口")
+            self.assertNotIn('curl -sS -X POST "$HOOK"', text, name)
 
     def test_no_input_interpolation_in_run_blocks(self):
         import yaml

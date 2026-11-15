@@ -34,6 +34,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # 告警凭据：composite action 里取不到 secrets，统一在 workflow env 注入一次
+  ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
+  ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
+  FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+  FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
   TZ: Asia/Shanghai
 
 jobs:
@@ -175,28 +180,13 @@ jobs:
 
       - name: 失败告警
         if: failure()
-        env:
-          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
-          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          PYTHONIOENCODING: utf-8
-        run: |
-          python scripts/alert.py "⚠️ 收盘选股任务运行失败，请查看日志" --run-url "$RUN_URL" \
-            || echo "::error::告警发送失败（独立告警通道可能也失效）"
-
-      # job 被整体取消（如 Actions 平台级超时 / 手动 cancel）时，GitHub 不会执行
-      # if: failure() 的步骤，上面那条告警会静默哑掉。用 always() 兜住这条路径。
+        uses: ./.github/actions/alert
+        with:
+          message: "⚠️ 收盘选股任务运行失败，请查看日志"
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       - name: 超时 / 取消兜底告警
         if: always() && job.status == 'cancelled'
-        env:
-          ALERT_WEBHOOK: ${{ secrets.ALERT_WEBHOOK }}
-          ALERT_SECRET: ${{ secrets.ALERT_SECRET }}
-          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          PYTHONIOENCODING: utf-8
-        run: |
-          python scripts/alert.py "⚠️ 收盘选股 job 被取消或超时（failure() 告警不会触发）" --run-url "$RUN_URL" \
-            || echo "::error::告警发送失败（独立告警通道可能也失效）"
+        uses: ./.github/actions/alert
+        with:
+          message: "⚠️ 收盘选股 job 被取消或超时（failure() 告警不会触发）"
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

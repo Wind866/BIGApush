@@ -1,4 +1,6 @@
 version: 2
+# 每个 ecosystem 的 PR 限额独立；5 个槽位一旦被跨大版本升级占满，
+# 后续安全补丁就再也开不出 PR。跨大版本必须人工评估后再合并。
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -7,7 +9,7 @@ updates:
       day: "monday"
       time: "09:30"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "security"
@@ -21,7 +23,7 @@ updates:
       day: "monday"
       time: "09:30"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "security"

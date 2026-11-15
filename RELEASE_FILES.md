@@ -200,8 +200,8 @@
 
 ### 敏感配置文件（不发布）
 - `config/config.yaml` - 本地配置（含API密钥）
-- `config/87659999.json` - 加密配置文件
-- `config/87659999_decrypted.json` - 解密配置文件
+- `config/87659999.json` - **已从仓库移除**：它把明文 `encryption_key` 与密文一起提交进了公开仓库，加密等于没做。授权配置改走 Secrets / 本地文件，`.gitignore` 已加规则防止再提交
+- `config/87659999_decrypted.json` - 解密后的配置，同样不入库
 - `config/tushare_config.json` - Tushare API配置（含Token）
 - `config/config_files_info.json` - 配置信息文件
 

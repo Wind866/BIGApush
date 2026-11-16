@@ -1,7 +1,8 @@
 name: CI · 语法 / 单元 / 档期表
 
 # 本仓库曾因 .gitignore 忽略 test_*.py 而长期零测试，
-# utils/buy_signal_judger.py 的 f-string 语法错误也一直无人发现。
+# 一个 utils 里的 f-string 语法错误也因此一直无人发现。
+# 现在 compileall + unittest 是硬门禁：任何 py 文件写坏都过不了。
 on:
   pull_request:
   # 原写法是 branches-ignore: [main]：本仓库大量改动直接提交到 main（含 bot

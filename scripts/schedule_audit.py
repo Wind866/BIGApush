@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""当日 9 档期「应到 / 实到」对账 —— 把「按时完成」变成可核对的数字。
+"""当日 10 档期「应到 / 实到」对账 —— 把「按时完成」变成可核对的数字。
 
 「实到」只认 **conclusion=success** 的运行。旧版只看 created_at，一个失败或
 被取消的 run 也会被记成「✅ 准点」，对账全绿却当天没推成功 —— 触发 ≠ 成功。
@@ -12,9 +12,9 @@
 
 覆盖范围说明
 ------------
-Actions 内置 GITHUB_TOKEN 只能读本仓库。另外两个仓库（etf-feishu-push /
-limit-up-relay）都是**公开仓库**，可以匿名读 Actions 记录（60 次/小时，
-9 个档期够用），所以未配 AUDIT_PAT 时不再整段放弃，而是自动降级为匿名查询：
+Actions 内置 GITHUB_TOKEN 只能读本仓库。另外三个仓库（etf-feishu-push /
+limit-up-relay / astock-screener）都是**公开仓库**，可以匿名读 Actions 记录
+（60 次/小时，10 个档期够用），所以未配 AUDIT_PAT 时不再整段放弃，而是自动降级为匿名查询：
 
   * 本仓库          → GITHUB_TOKEN
   * 其他公开仓库    → AUDIT_PAT（若配置）> 匿名
@@ -87,7 +87,7 @@ def api_get(path: str, token: str) -> dict:
         "User-Agent": "schedule-audit",
     }
     # token 为空时走匿名请求：公开仓库的 Actions 记录本来就能匿名读，
-    # 只是限额 60 次/小时（本脚本一次对账 9 个档期，够用）。
+    # 只是限额 60 次/小时（本脚本一次对账 10 个档期，够用）。
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(API + path, headers=headers)

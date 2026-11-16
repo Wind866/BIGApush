@@ -58,10 +58,11 @@ class TestPythonSyntax(unittest.TestCase):
 class TestWorkerPlan(unittest.TestCase):
     def test_expected_unique_slots(self):
         # 「档期对账」纳入 PLAN 后是 10 档；2026-11-16 下线 limit-up-relay 中午 12:33
-        # 盘中快照档后为 9 档。这条断言防的是「档期被意外删掉」，不是把数字当成目标；
+        # 盘中快照档后为 9 档；同日接入 astock-screener 20:33 档后恢复为 10 档。
+        # 这条断言防的是「档期被意外删掉」，不是把数字当成目标；
         # 新增或下线档期时请同步 cloudflare/README.md 的档期表。
         plan = parse_plan()
-        self.assertEqual(len(plan), 9, f"档期数量应为 9，实际 {len(plan)}")
+        self.assertEqual(len(plan), 10, f"档期数量应为 10，实际 {len(plan)}")
         times = [s["at"] for s in plan]
         self.assertEqual(len(times), len(set(times)), "档期时间有重复")
 

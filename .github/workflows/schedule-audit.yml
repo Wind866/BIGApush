@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # AUDIT_PAT 是可选的 fine-grained PAT（三仓库 Actions: read）。
+      # AUDIT_PAT 是可选的 fine-grained PAT（四仓库 Actions: read）。
       # 不配置时脚本只核对本仓库，其余标「未覆盖」而不误判为漏跑。
       - name: 生成档期对账报告
         env:

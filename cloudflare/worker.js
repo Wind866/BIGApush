@@ -10,14 +10,14 @@
  * 为什么用「一个每分钟 cron + 内部时间表」
  * ------------------------------------
  * Cloudflare Workers 免费版：**整个账号只有 5 个 Cron Trigger**（不是每个 Worker 5 个）。
- * 这里共 9 个档期（含对账、自检与 Keep Alive），逐个配 cron 装不下。改用单个 `* * * * *` 每分钟唤醒一次，
+ * 这里共 10 个档期（含对账、自检与 Keep Alive），逐个配 cron 装不下。改用单个 `* * * * *` 每分钟唤醒一次，
  * 在代码里换算成北京时间并查表命中，只占 1 个额度；每天 1440 次调用，
  * 远低于免费版 100,000 次/天。未命中的分钟不做任何网络请求。
  *
  * 需要配置的 Secrets / Variables
  * ------------------------------
- *   GH_TOKEN        Secret  fine-grained PAT，勾选下面 3 个仓库的 Actions: Read and write
- *                           BIGApush / limit-up-relay / etf-feishu-push
+ *   GH_TOKEN        Secret  fine-grained PAT，勾选下面 4 个仓库的 Actions: Read and write
+ *                           BIGApush / limit-up-relay / etf-feishu-push / astock-screener
  *   ALERT_WEBHOOK   Secret  独立的飞书机器人 webhook，用于调度失败告警
  *                           （不要和业务推送共用同一个，否则 webhook 挂了告警也发不出去）
  *   FEISHU_APP_ID      Secret  自建应用 App ID（cli_ 开头），用于「群里发代码查个股」
@@ -67,7 +67,10 @@ const API = "https://api.github.com";
 // slot_hour 已同步改过：只改这里不改仓库侧，兜底 cron 会算错档期。
 // 2026-11-16.1：下线 limit-up-relay 中午 12:33 盘中快照档 —— 该仓库只保留 18:53
 // 收盘定稿并只推送一次飞书；档期数 10 → 9，SLOT_INPUTS 仍保留（见下方说明）。
-const BUILD = "2026-11-16.1";
+// 2026-11-16.2：接入 astock-screener 准点调度，20:33 收盘后事件采集推送；
+// GH_TOKEN 需同时勾选 astock-screener 的 Actions: Read and write，否则该档 403。
+// 档期数 9 → 10。
+const BUILD = "2026-11-16.2";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -91,6 +94,13 @@ const PLAN = [
   {
     at: "20:03", days: "weekday", name: "ETF 资金流向",
     targets: ["etf-feishu-push/daily-push.yml"],
+  },
+  {
+    // 收盘后事件采集：股东增减持 / 定增 / 回购 / 分红。此前只靠 GitHub cron，
+    // 实测延迟数小时甚至漏档；2026-11-16 起纳入 Worker 准点派发。
+    // 该仓库台账按「运行当日 + slot」判重，兜底 cron 因此全部收敛在当天，不跨午夜。
+    at: "20:33", days: "weekday", name: "A股事件筛选（收盘后）",
+    targets: ["astock-screener/daily.yml"],
   },
   {
     at: "21:53", days: "all", name: "晚间新闻",

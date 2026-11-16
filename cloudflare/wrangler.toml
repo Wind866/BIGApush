@@ -3,7 +3,7 @@ main = "worker.js"
 compatibility_date = "2026-11-14"
 
 # 只用一个 cron，占掉免费账号 5 个额度里的 1 个。
-# Worker 每分钟唤醒一次，内部按北京时间查表命中 10 个档期（含 22:33 档期对账）；
+# Worker 每分钟唤醒一次，内部按北京时间查表命中 9 个档期（含 22:33 档期对账）；
 # 未命中的分钟零网络请求。档期数量以 cloudflare/worker.js 的 PLAN 为准。
 # 部署前请先删掉旧 Worker biga-push-cron 的 cron（13 14 * * *），否则晚间新闻会触发两次。
 [triggers]

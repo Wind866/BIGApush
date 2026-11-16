@@ -17,12 +17,11 @@ GitHub cron   延迟数小时 ─┘        ↑
                                       后到的那次读台账后秒级退出
 ```
 
-本 Worker **一个脚本管 3 个仓库、10 个档期**：
+本 Worker **一个脚本管 3 个仓库、9 个档期**：
 
 | 北京时间 | 目标 |
 | --- | --- |
 | 08:13 每天 | BIGApush / 早间新闻 |
-| 12:33 工作日 | limit-up-relay / 盘中快照 |
 | 12:53 工作日 | BIGApush / 盘中选股 |
 | 18:53 工作日 | limit-up-relay / 收盘定稿 |
 | 19:33 工作日 | BIGApush / 收盘选股 |
@@ -32,10 +31,12 @@ GitHub cron   延迟数小时 ─┘        ↑
 | 周一 07:13 | BIGApush + limit-up-relay / 数据源自检 |
 | 周二 01:03 | BIGApush / Keep Alive |
 
-> **12:33 与 18:53 共用 `limit-up-relay/daily.yml`**：Worker 会通过
-> `SLOT_INPUTS` 显式传入 `expect_hhmm`（`1233` / `1853`）。不要删掉它 ——
-> 少了这个输入，workflow 只能按运行时刻猜档期，Actions 排队一久就会把盘中快照
-> 记成收盘档，台账随后把真正的收盘定稿判重跳过（静默漏推）。
+> **`limit-up-relay` 只剩 18:53 一个档期**：该仓库中午 12:33 的盘中快照已于 2026-11-16 下线
+> （只保留收盘定稿并只推送一次飞书），Worker 的 `PLAN` 表已同步删除该档。
+> `SLOT_INPUTS` 仍通过 `expect_hhmm`（`1853`）显式传档期号 —— 不要删掉它，
+> 少了这个输入，workflow 只能按运行时刻猜档期，Actions 排队一久就会记错档，台账随后
+> 把真正的收盘定稿判重跳过（静默漏推）。该仓库的 workflow 另有 job 级 `if` 拒收 `1233`，
+> 即使旧档期残留也不会产生中午卡片。
 
 > Cloudflare 免费版**整个账号只有 5 个 Cron Trigger**，逐个档期配 cron 装不下。
 > 这里用单个 `* * * * *` 每分钟唤醒一次，代码里换算成北京时间查表命中，
@@ -120,7 +121,7 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=21:53&key=<TOKEN>  手
 > 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
 `/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
-当前这一版是 `"build": "2026-11-15.3"`，且响应里应有 `alertSignSupported: true`
+当前这一版是 `"build": "2026-11-16.1"`，且响应里应有 `alertSignSupported: true`
 （旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
 没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
 不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
@@ -133,7 +134,7 @@ curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | py
 
 | 字段 | 期望 | 不对时怎么办 |
 | --- | --- | --- |
-| `build` | `2026-11-15.3` | 线上不是这版 → 重新 deploy |
+| `build` | `2026-11-16.1` | 线上不是这版 → 重新 deploy |
 | `alertSignSupported` | `true` | 旧代码（本版新增字段） |
 | `tokenValid` | `true` | `GH_TOKEN` 过期或没勾三仓库 Actions 权限 |
 | `alertConfigured` | `true` | 没配 `ALERT_WEBHOOK`，告警只留在 Worker 日志 |
@@ -364,7 +365,7 @@ curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里�
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-15.3，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-16.1，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 

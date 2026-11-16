@@ -1,25 +1,50 @@
 # ============================================
-# A股量化选股系统 - 主配置文件模板
+# A股量化选股系统 - 主配置模板
 # ============================================
-# 使用说明：
-# 1. 复制此文件为 config.yaml
-# 2. 推荐用环境变量 FEISHU_WEBHOOK 配置机器人（GitHub Actions 用 Secrets）
-# 3. config.yaml 是入库文件（clone 即可运行，已跟踪），切勿写入真实密钥
+# 使用说明：复制本文件为 config.yaml；config.yaml 是入库文件（clone 即可运行）。
+# 真实 webhook / 密钥一律通过环境变量或 GitHub Secrets 提供，切勿写入任一被跟踪的配置文件。
+# CI 门禁 tests/test_smoke.py::test_no_real_webhook_committed 会拦截误提交。
+# 本模板与 config.yaml 保持同步；修改配置时请同时更新两者。
 
 data_dir: data
 
+
 # 飞书机器人配置
-# 留空即可：main.py 会优先读取环境变量 FEISHU_WEBHOOK。
-# 如确需本地填写，请用 config/config.local.yaml（已加入 .gitignore），切勿写进本文件。
+# ⚠️ 安全提示：请勿在此填写真实 webhook。公开仓库中的任何内容都会被爬虫抓取，
+#    拿到 webhook 的人可向你的群随意发消息。请改用环境变量 / GitHub Secrets：
+#      FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx
+#    本文件保留空值，main.py 会优先读取环境变量。
+#    若曾经提交过真实 webhook，请务必到飞书群「设置 → 群机器人」重置该机器人。
 feishu:
   webhook_url: ""
 
-# 定时任务配置（仅本地运行参考；线上以 .github/workflows/*.yml 的 cron 为准）
-# 北京时间：盘中选股 13:13 / 收盘选股 15:43 / 早间新闻 08:43 / 晚间新闻 22:13
+# 定时任务配置（仅本地 schedule 模式参考；GitHub Actions 以 workflow cron 为准）
 schedule:
-  time: "19:33"  # 与 .github/workflows/selection.yml 的主档 cron 保持一致
+  time: "19:33"  # 收盘选股时间（北京时间，与 .github/workflows/selection.yml 的 cron 保持一致）
 
 # 数据更新配置
 update:
   lookback_days: 10
   skip_failed: true
+
+# 股票过滤配置
+filters:
+  # 最小市值（亿元）
+  min_market_cap: 40
+  # 最大市值（亿元）
+  max_market_cap: 5000
+  # 最小流通股本（亿股）
+  min_float_shares: 1
+  # 最大流通股本（亿股）
+  max_float_shares: 100
+  # 排除新股（上市天数）
+  exclude_new_stock_days: 60
+  # 排除ST股票
+  exclude_st: true
+  # 排除退市风险股票
+  exclude_delisting_risk: true
+
+# 交易配置
+trading:
+  # 初始资金（元）
+  initial_capital: 300000.0

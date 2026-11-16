@@ -164,7 +164,7 @@ npx wrangler tail --name gh-actions-scheduler                   # 实时日志
 
 - Settings → Triggers 的 Cron expression 必须是 `* * * * *`（面板显示 `Every minute`）。
   `/health` 只能证明 Worker 已部署，**证明不了触发器生效**。
-- `GET /test?at=21:53&key=<ADMIN_TOKEN>` 会触发一次真实 `workflow_dispatch`，
+- `GET /test?at=21:53`（带 `X-Admin-Token` 请求头；兼容 `&key=<ADMIN_TOKEN>` 查询参数）会触发一次真实 `workflow_dispatch`，
   打完去 GitHub Actions 看有没有新增运行，并在 `wrangler tail` 里看 `[ALERT] 告警已发送`。
   它会消耗 Actions 额度、可能往群里推消息，日常只看 `/health` 即可。
 
@@ -264,8 +264,9 @@ GitHub Actions 跑真实取数 → 结论推回提问的那个群
 只有在你自己有域名、并把域名绑到 Worker 之后才值得配：
 
 - 事件与回调 → 订阅方式选「将事件发送至开发者服务器」
-- 请求地址：`https://<你的域名>/feishu?key=<ADMIN_TOKEN>`（不要用 `*.workers.dev`，国内不通）
-  末尾的 `?key=` 不能省：`POST /feishu` 现在要求 `ADMIN_TOKEN`，否则飞书回调会被 403 挡掉
+- 请求地址：`https://<你的域名>/feishu`（不要用 `*.workers.dev`，国内不通）
+  必须带 `X-Admin-Token: <ADMIN_TOKEN>` 请求头；飞书回调无法自定义请求头时可退回 `?key=<ADMIN_TOKEN>`。
+  优先使用请求头，因为 URL 容易进入日志、浏览器历史和 Referer。
 - 添加事件：`接收消息 im.message.receive_v1`
 
 保存时飞书会打一发 `url_verification`，本 Worker 原样回 `challenge`，保存成功即地址通。

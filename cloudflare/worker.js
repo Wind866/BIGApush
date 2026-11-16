@@ -414,9 +414,9 @@ function timingSafeEqual(a, b) {
  * 现在改为**默认关闭**：没配 ADMIN_TOKEN 就一律 503，并直接告诉你怎么配。
  * 安全默认优先于便利——这类端点平时只有部署者在自测时用，配一个密钥的成本很低。
  *
- * 配好后用任意一种方式带上：
- *   - 查询参数： ?key=<ADMIN_TOKEN>
+ * 配好后优先使用请求头（URL 容易进入日志/历史/Referer）：
  *   - 请求头：   X-Admin-Token: <ADMIN_TOKEN>
+ *   - 兼容方式： ?key=<ADMIN_TOKEN>
  */
 function requireAdmin(req, env) {
   const expected = (env.ADMIN_TOKEN || "").trim();

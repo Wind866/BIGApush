@@ -684,7 +684,9 @@ def render_stock_card(
     advice_rect = _rect(cur, 2.30)
 
     try:
-        fig = plt.figure(figsize=(9, canvas_h), dpi=120, facecolor=BG)
+        # dpi 120→240：matplotlib 按 dpi 等比重绘，字体/线宽全部同步放大，
+        # 2x 源在飞书端缩放显示后明显更锐利（1080px → 2160px）。
+        fig = plt.figure(figsize=(9, canvas_h), dpi=240, facecolor=BG)
         _draw_header(fig, name=name, code=code, market=market, industry=industry,
                      price=price, pct=pct, cap=cap)
         price_ax = _draw_kline(fig, hist, name, kline_rect, vol_rect)
@@ -698,7 +700,7 @@ def render_stock_card(
 
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=120, facecolor=BG)
+        fig.savefig(out, dpi=240, facecolor=BG)
         plt.close(fig)
         print(f"[CARD] 已生成 {out} {out.stat().st_size // 1024}KB")
         return True

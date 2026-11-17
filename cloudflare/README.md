@@ -122,7 +122,7 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=21:53&key=<TOKEN>  手
 > 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
 `/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
-当前这一版是 `"build": "2026-11-17.1"`，且响应里应有 `alertSignSupported: true`
+当前这一版是 `"build": "2026-11-17.4"`，且响应里应有 `alertSignSupported: true`
 （旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
 没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
 不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
@@ -135,8 +135,9 @@ curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | py
 
 | 字段 | 期望 | 不对时怎么办 |
 | --- | --- | --- |
-| `build` | `2026-11-17.1` | 线上不是这版 → 重新 deploy |
+| `build` | `2026-11-17.4` | 线上不是这版 → 重新 deploy |
 | `alertSignSupported` | `true` | 旧代码（本版新增字段） |
+| `dedupeBackend` | `d1` | `none` = 没绑 D1，去重只剩 Cache + 守卫两层 |
 | `tokenValid` | `true` | `GH_TOKEN` 过期或没勾四仓库 Actions 权限 |
 | `alertConfigured` | `true` | 没配 `ALERT_WEBHOOK`，告警只留在 Worker 日志 |
 | `alertSecretConfigured` | `true` | 机器人开了加签却没配 `ALERT_SECRET` → 飞书 19021 拒收 |
@@ -210,7 +211,9 @@ artifact；发现已覆盖范围内有漏跑就让任务失败、走告警。
 ## 额度与限制
 
 - 免费版 100,000 请求/天、每账号 5 个 Cron Trigger：本方案占 1 个、约 1440 次/天
-- Worker 无状态，不需要 KV / D1 / 任何存储；档期去重靠查 Actions API（3 分钟窗口）
+- **档期**去重不依赖任何存储，靠查 Actions API（3 分钟窗口）；
+- **飞书查询**去重可选绑定 D1（`feishu_msg` 表，键为 `message_id`）。不绑也能跑：
+  只剩 Cache + GitHub 守卫两层，`/health` 的 `dedupeBackend` 会是 `none`
 - CF cron 极端情况可能晚几秒到几分钟，与 GitHub 的「几小时」不是一个量级
 - A 股节假日不做硬编码，由各脚本自己的交易日探测跳过
 
@@ -292,12 +295,16 @@ npx wrangler deploy
 
 - 只认**文本消息里的 6 位连续数字**；闲聊不回应（避免机器人在群里刷屏）
 - **必须 @ 机器人**：群里别人发的 6 位数字（订单号、金额）不会被当成股票代码
-- **去重分三层**：
+- **去重分四层，前三层都在「回执之前」，所以重复的「已收到」也不会出现**：
   1. 实例内 `Map`（`pollSeen` / `seenEvents` / `notifyAt`）；
-  2. Cache API（30 分钟），**只在同一个 Cloudflare colo 内跨实例生效**，不是全局存储；
-  3. GitHub Actions 幂等闸：`stock-query.yml` 的 `run-name` 把 `CODES=` / `CHAT=` 写进运行页标题，
-     Worker 派发前查最近 5 分钟的 dispatch，同一会话 + 同一组代码已存在就直接跳过。
-     这一层不依赖 Cloudflare 节点，能同时挡住「轮询 + 回调双路径」和「跨 colo 冷启动」。
+  2. Cache API（30 分钟），**只在同一个 Cloudflare colo 内跨实例生效**，不是全局存储 ——
+     它是快速路径，不能当权威判据；
+  3. D1 原子认领（`INSERT OR IGNORE` 主键冲突，可选）：`msg_id` 为键，跨实例跨 colo 都成立。
+     需要绑定 `DB` 与建表 `feishu_msg`；未绑定时自动降级，`/health` 显示 `dedupeBackend: "none"`；
+  4. GitHub Actions 幂等闸：`stock-query.yml` 的 `run-name` 把 `CODES=` / `CHAT=` 写进运行页标题，
+     派发前查最近 5 分钟的 dispatch，同一会话 + 同一组代码已存在就整个跳过。
+     这一层不依赖 Cloudflare 任何存储，能同时挡住「轮询 + 回调双路径」和「跨 colo 冷启动」，
+     也让「派发返回 5xx 但 GitHub 其实已受理」变得安全 —— 重试会先撞上这道闸。
 - 一次最多 6 只，超出部分在 `extractCodes()` 里截断
 - 同一组代码 90 秒内只触发一次（实例 + Cache）；跨实例/跨路径再靠上面的 5 分钟 API 幂等闸；
   飞书重投的同一 `event_id` 直接忽略
@@ -372,7 +379,7 @@ curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里�
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-17.1，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-17.4，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 
@@ -392,11 +399,20 @@ curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报�
 只靠内存去重就会「各回执一次、各派发一次」。第一层补的是 **Cache API**
 （`msg:<message_id>` / `rcpt:<会话:代码>` / `q:<会话:代码>`，TTL 30 分钟），
 但 Cache 只在同 colo 内跨实例存活；若两次执行落到不同节点，仍会各派发一次。
-第二层补的是 **GitHub Actions 幂等闸**：派发前按 `run-name` 里的 `CODES=` / `CHAT=`
-查最近 5 分钟的运行记录，同一会话 + 同一组代码已派发就跳过。
+但 Cache 只在同 colo 内跨实例存活；若两次执行落到不同节点，仍会各派发一次。
+所以又加了两层：**D1 原子认领**（`msg_id` 主键冲突，跨 colo 成立，需绑定 `DB`）与
+**GitHub Actions 幂等闸**（派发前按 `run-name` 里的 `CODES=` / `CHAT=` 查最近 5 分钟
+的运行记录，同一会话 + 同一组代码已派发就整个跳过，回执也不发）。
 
-对应回归测试：`node tests/test_worker_dedupe.mjs`（Cache 层）与
-`node tests/test_worker_query_dedupe.mjs`（Actions 幂等层，CI 会跑）。
+`/health` 的 `dedupeBackend` 应为 `d1`；显示 `none` 说明 D1 没绑上，此时只剩 Cache + 守卫。
+
+对应回归测试，三条都会在 CI 里跑：
+
+```bash
+node tests/test_worker_dedupe.mjs          # Cache 层：两次冷启动只回执一次、只派发一次
+node tests/test_worker_query_dedupe.mjs    # GitHub 守卫层：跨 colo 也已存在同单时不再派发
+node tests/test_worker_dedupe_extra.mjs    # D1 认领层 + 5xx 二义性：重试不会出第二张图
+```
 
 ## 每次改 worker.js 之后
 

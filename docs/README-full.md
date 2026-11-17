@@ -189,7 +189,9 @@ filters:
   exclude_st: true       # 排除 ST
 ```
 
-`config/config.yaml.template` 是可复制的模板。其它策略参数在 `config/strategy_*.yaml` 中调整。
+`config/config.yaml` 既是入库的默认配置，也是唯一的模板来源（原先并存的
+`.template` 已删除）。需要本地私有配置时，复制为 `config/config.local.yaml`
+（该文件已被 `.gitignore` 忽略）。其它策略参数在 `config/strategy_*.yaml` 中调整。
 
 **关于收盘选股的数据更新**：修复时区后，`main.py` 会在 19:33 真正执行每日增量更新
 （此前因 UTC 误判一直被跳过）。首次运行需 `python main.py init` 全量初始化，约 30~45 分钟；

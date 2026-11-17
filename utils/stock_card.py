@@ -53,6 +53,13 @@ CHIP_PROFIT = "#eaa1a1"
 CHIP_TRAPPED = "#8ec4a8"
 CHIP_AVG = "#8a5cf5"
 
+# 决策仪表盘四块的语义色（红=风险警示、绿=利好、蓝=信息、紫=最新消息）。
+# 注意：这里的红绿是「告警/利好」的 UI 语义，不是涨跌——涨跌仍用上面的 UP/DOWN。
+INSIGHT_BLUE = "#2f6fdb"
+INSIGHT_RED = "#d64545"
+INSIGHT_GREEN = "#178a4b"
+INSIGHT_PURPLE = "#7c4dcc"
+
 FONT_FILES = (
     # Linux runner（workflow 里 apt-get install fonts-noto-cjk 后就有）
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -537,6 +544,62 @@ def _draw_advice(fig, advice, signals, risks, rect):
 
 
 
+def _draw_insights(fig, insights, rect):
+    """决策仪表盘四块文字：重要信息速览 / 风险警报 / 利好催化 / 最新动态。
+
+    每块一个小标题 + 若干条，圆点引导。用游标自上而下排，行高固定，
+    内容多时各块按 _wrap 折行并限行，绝不互相压字。
+    """
+    if not insights:
+        return
+    ax = fig.add_axes(rect)
+    ax.set_axis_off()
+
+    sections = [
+        ("重要信息速览", [
+            ("舆情情绪", insights.get("sentiment"), INSIGHT_BLUE),
+            ("业绩预期", insights.get("expectation"), INSIGHT_GREEN),
+        ]),
+        ("风险警报", [
+            (f"风险点{i}", text, INSIGHT_RED)
+            for i, text in enumerate(insights.get("risks") or [], 1)
+        ]),
+        ("利好催化", [
+            (f"利好{i}", text, INSIGHT_GREEN)
+            for i, text in enumerate(insights.get("catalysts") or [], 1)
+        ]),
+        ("最新动态", [
+            ("最新消息", insights.get("latest"), INSIGHT_PURPLE)
+        ] if insights.get("latest") else []),
+    ]
+
+    cursor = 0.97   # 从块顶往下画
+    for title, rows in sections:
+        rows = [(label, text, color) for label, text, color in rows if text]
+        if not rows:
+            continue
+        # 小标题带左侧色条
+        ax.add_patch(Rectangle((0.010, cursor - 0.052), 0.006, 0.050,
+                               transform=ax.transAxes, facecolor=rows[0][2],
+                               edgecolor="none"))
+        ax.text(0.026, cursor, title, transform=ax.transAxes, fontsize=11,
+                color=INK, fontweight="bold", family=_font_bold or _font_name,
+                va="top")
+        cursor -= 0.075
+
+        for label, text, color in rows:
+            for i, line in enumerate(_wrap(f"{label}：{text}", 88, max_lines=2)):
+                ax.text(0.030, cursor, "•", transform=ax.transAxes, fontsize=11,
+                        color=color, family=_font_name, va="top")
+                ax.text(0.055, cursor, line, transform=ax.transAxes, fontsize=10.5,
+                        color=color if i == 0 else SUB, family=_font_name, va="top")
+                cursor -= 0.058
+            cursor -= 0.012
+        cursor -= 0.025
+        if cursor < 0.03:   # 内容超出预留高度就不再画，避免压到 footer
+            break
+
+
 def _draw_footer(fig, sources, generated_at):
     fig.text(0.05, 0.030, f"数据来源：{sources}", fontsize=8.5, color=SUB,
              family=_font_name, va="center")
@@ -569,6 +632,7 @@ def render_stock_card(
     hist=None,
     chips: Optional[dict] = None,
     flow_hist: Optional[list] = None,
+    insights: Optional[dict] = None,
     generated_at: str = "",
     sources: str = "腾讯行情 / 同花顺资金流 / 新浪资金流历史 / 百度估值 / 新浪财报",
 ) -> bool:
@@ -595,6 +659,7 @@ def render_stock_card(
     growth = growth or {}
     advice = advice or {}
     signals = signals or []
+    insights = insights if isinstance(insights, dict) else None
     chips = chips if isinstance(chips, dict) and chips.get("available") else {}
     flow_hist = [r for r in (flow_hist or []) if isinstance(r, dict) and r.get("net") is not None]
     indicators = technical.get("indicators") or {}
@@ -654,7 +719,13 @@ def render_stock_card(
 
     # 自顶向下按「英寸」堆叠，而不是写死一堆百分比：面板多一块就只加画布高度，
     # 不用把其它面板的百分比统统重算一遍（重算最容易压字）。
-    canvas_h = 13.7 if has_flow else 12.6
+    # 决策仪表盘四块文字大约要 3.6 英寸：标题+舆情+业绩+风险3+利好2+最新。
+    insight_h = 3.6 if insights and any(
+        insights.get(k) for k in ("sentiment", "expectation", "risks", "catalysts", "latest")
+    ) else 0.0
+    # 底部留白：全中文四块文字较长，多留 1.7 英寸，避免「最新动态」压到页脚来源行
+    footer_gap = 1.7 if insight_h else 0.0
+    canvas_h = (13.7 if has_flow else 12.6) + insight_h + footer_gap
     def _rect(offset_in, height_in, x=0.055, w=0.90):
         top_in = canvas_h * 0.885          # 顶部色带上沿
         return [x, (top_in - offset_in - height_in) / canvas_h, w, height_in / canvas_h]
@@ -682,11 +753,17 @@ def render_stock_card(
     metrics_rect = _rect(cur, 3.55)
     cur += 3.55 + 0.12
     advice_rect = _rect(cur, 2.30)
+    if insight_h:
+        cur += 2.30 + 0.10
+        insights_rect = _rect(cur, insight_h)
+    else:
+        insights_rect = None
 
     try:
-        # dpi 120→240：matplotlib 按 dpi 等比重绘，字体/线宽全部同步放大，
-        # 2x 源在飞书端缩放显示后明显更锐利（1080px → 2160px）。
-        fig = plt.figure(figsize=(9, canvas_h), dpi=240, facecolor=BG)
+        # dpi 240→300：matplotlib 按 dpi 等比重绘，字体/线宽全部同步放大；
+        # 300 源在手机飞书端缩放后更锐利（9in 宽 → 2700px），文字边缘不发虚。
+        FIG_DPI = 300
+        fig = plt.figure(figsize=(9, canvas_h), dpi=FIG_DPI, facecolor=BG)
         _draw_header(fig, name=name, code=code, market=market, industry=industry,
                      price=price, pct=pct, cap=cap)
         price_ax = _draw_kline(fig, hist, name, kline_rect, vol_rect)
@@ -696,11 +773,13 @@ def render_stock_card(
             _draw_flow(fig, flow_hist, flow_rect)
         _draw_metrics(fig, items, metrics_rect)
         _draw_advice(fig, advice, signals, risks, advice_rect)
+        if insights_rect:
+            _draw_insights(fig, insights, insights_rect)
         _draw_footer(fig, sources, generated_at)
 
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out, dpi=240, facecolor=BG)
+        fig.savefig(out, dpi=FIG_DPI, facecolor=BG)
         plt.close(fig)
         print(f"[CARD] 已生成 {out} {out.stat().st_size // 1024}KB")
         return True

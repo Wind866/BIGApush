@@ -110,10 +110,11 @@ jobs:
                       # conclusion 为 None 表示仍在运行 —— 此时跳过是对的，结果马上就到。
                       if run.get("conclusion") not in (None, "", "success"):
                           continue
-                      # 必须 display_title 在前：name 是工作流名（「个股深度分析 · 查询即推送」），
-                      # 只有 display_title 才是 run-name 里的「个股查询 CODES=… CHAT=…」。
-                      # 旧顺序用 `name or display_title`，name 永远非空 → 正则永远匹配不到
-                      # CODES= → skip 恒为 False，守卫自上线起从未拦住过任何一次重复。
+                      # 配置了 run-name 时，name 与 display_title 是同值（都等于
+                      # 「个股查询 CODES=… CHAT=…」）；没配 run-name 时两者都退化成工作流名。
+                      # 语义上 display_title 才是 run-name 的正式字段，这里优先用它，
+                      # 避免 GitHub 调整 name 的取值来源时静默失配。两者都取不到时
+                      # skip 自然为 False（照常推送），不会误拦真实查询。
                       title = run.get("display_title") or run.get("name") or ""
                       m_codes = re.search(r"CODES=(\S*)", title)
                       m_chat = re.search(r"CHAT=(\S*)", title)

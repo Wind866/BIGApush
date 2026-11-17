@@ -58,7 +58,8 @@ cd BIGApush
 | 周二 01:03 | 仓库心跳（防 60 天无活动停用定时任务） | `keep-alive.yml` |
 
 - cron 使用 UTC：`UTC = 北京时间 − 8h`。
-- 每个业务任务另有 2~3 档错开的兜底 cron，靠「档期 + 台账」判重，补档不重复推送。
+- 每个业务任务另有 2~3 档错开的兜底 cron，**全部收敛在当天、不跨日**，靠「档期 + 台账」判重，补档不重复推送。
+- **当天任务当天完成**：若调度延迟把任务拖到次日才触发，`evening-news.yml`、`selection.yml` 的跨日守卫会直接判红并告警（带具体原因），不静默补跑前一天档期；`force` 手动触发不受限。
 - **改主档时间必须同步三处**：workflow 的 `schedule`、脚本内的 `EXPECT_HHMM`、Worker 的 `PLAN`。`schedule-audit.yml` 会校验前者的一致性。
 
 ## 目录结构
@@ -117,7 +118,7 @@ Web 管理界面：双击 `start.bat`（Windows）或 `python web_server.py`。
 | 症状 | 原因 | 处理 |
 | --- | --- | --- |
 | 飞书返回 19021 | 机器人开启加签但密钥未配/配错 | 补配 `FEISHU_SECRET`，或关闭加签 |
-| 卡片日期与预期不符 | cron 常延迟数小时 | 任务按行情时间戳记档期，属预期行为 |
+| 卡片日期与预期不符 | cron 常延迟数小时 | 任务按行情时间戳记档期，属预期行为；若已跨日则会在守卫处判红告警、不推送 |
 | Actions 绿但群里没消息 | `FEISHU_WEBHOOK` 未配或机器人被重置 | 重新配置 Secrets |
 | 档期对账判红 | 某档确实没跑 | 看 `schedule-audit` artifact，用 workflow_dispatch 手动补档 |
 | 取数为空 | akshare 上游字段变更 | 跑 `verify-valuation.yml` 定位，再决定是否升级 pin |

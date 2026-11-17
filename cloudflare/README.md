@@ -122,7 +122,7 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=21:53&key=<TOKEN>  手
 > 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
 `/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
-当前这一版是 `"build": "2026-11-16.2"`，且响应里应有 `alertSignSupported: true`
+当前这一版是 `"build": "2026-11-17.1"`，且响应里应有 `alertSignSupported: true`
 （旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
 没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
 不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
@@ -135,7 +135,7 @@ curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | py
 
 | 字段 | 期望 | 不对时怎么办 |
 | --- | --- | --- |
-| `build` | `2026-11-16.2` | 线上不是这版 → 重新 deploy |
+| `build` | `2026-11-17.1` | 线上不是这版 → 重新 deploy |
 | `alertSignSupported` | `true` | 旧代码（本版新增字段） |
 | `tokenValid` | `true` | `GH_TOKEN` 过期或没勾四仓库 Actions 权限 |
 | `alertConfigured` | `true` | 没配 `ALERT_WEBHOOK`，告警只留在 Worker 日志 |
@@ -273,7 +273,9 @@ GitHub Actions 跑真实取数 → 结论推回提问的那个群
 保存时飞书会打一发 `url_verification`，本 Worker 原样回 `challenge`，保存成功即地址通。
 加密策略保持默认不填最省事；若开了，需同步 `npx wrangler secret put FEISHU_ENCRYPT_KEY`。
 
-轮询与回调**可以同时开着**，`message_id` / `event_id` 各自去重，不会重复触发分析。
+轮询与回调**可以同时开着**，但 `message_id` / `event_id` 只覆盖同一条入站消息；
+两条路径各自扫到时仍可能各派发一次。**现在由 GitHub Actions 侧的幂等闸兜底**
+（见下方「行为说明」），所以不会重复推送；如果不需要回调，建议只保留轮询，链路最简。
 
 **4. 给 Worker 配 Secret**
 
@@ -290,13 +292,15 @@ npx wrangler deploy
 
 - 只认**文本消息里的 6 位连续数字**；闲聊不回应（避免机器人在群里刷屏）
 - **必须 @ 机器人**：群里别人发的 6 位数字（订单号、金额）不会被当成股票代码
-- 轮询按 `message_id` 去重，同一条消息只处理一次；回调按 `event_id` 去重
-- **去重分两层**：实例内的 `Map` + Cache（30 分钟）。cron 每分钟唤醒，但 Cloudflare
-  不保证复用实例，冷实例的 `Map` 是空的 —— 只靠内存去重时同一条消息会被前后两个
-  实例各扫一遍，群里出现**两条「已收到」**、Actions 跑两遍推两张图。Cache 跨实例
-  存活，能挡住这种重复（现象与排查见文末「两条已收到」）
-- 一次最多 6 只，超出部分丢弃并在回执里体现
-- 同一组代码 90 秒内只触发一次；飞书重投的同一 `event_id` 直接忽略
+- **去重分三层**：
+  1. 实例内 `Map`（`pollSeen` / `seenEvents` / `notifyAt`）；
+  2. Cache API（30 分钟），**只在同一个 Cloudflare colo 内跨实例生效**，不是全局存储；
+  3. GitHub Actions 幂等闸：`stock-query.yml` 的 `run-name` 把 `CODES=` / `CHAT=` 写进运行页标题，
+     Worker 派发前查最近 5 分钟的 dispatch，同一会话 + 同一组代码已存在就直接跳过。
+     这一层不依赖 Cloudflare 节点，能同时挡住「轮询 + 回调双路径」和「跨 colo 冷启动」。
+- 一次最多 6 只，超出部分在 `extractCodes()` 里截断
+- 同一组代码 90 秒内只触发一次（实例 + Cache）；跨实例/跨路径再靠上面的 5 分钟 API 幂等闸；
+  飞书重投的同一 `event_id` 直接忽略
 - 非文本消息（图片/文件）回一句「只认文本股票代码」
 - 失败会回「触发失败，GH_TOKEN 可能已过期」，不会静默
 - 结果回到**提问的那个会话**（Worker 把 `chat_id` 传给 workflow）；万一按会话发送失败，
@@ -342,6 +346,7 @@ https://<域名>/feishu/poll
       ↳ 已派发 002163（回执没发出去：230035 ...）      ← 任务照跑，只是群里没回执
       ↳ 派发失败：HTTP 401 ...（下一轮重试）            ← 没派出去，不会记去重，下一分钟重试
       ↳ 刚查过，跳过派发 002163                         ← 90 秒冷却内重复 @，只回一句提示
+      ↳ 5 分钟内已有同单，跳过重复派发 002163            ← Actions 幂等闸挡住跨实例/双路径重复
       ↳ 这条已被另一个实例处理，跳过（跨实例去重生效）  ← 冷实例重复扫到，不会重复回执/派发
 ```
 
@@ -367,7 +372,7 @@ curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里�
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-16.2，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-17.1，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 
@@ -384,12 +389,14 @@ curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报�
 2. 冷实例的 `pollSeen` / `seenEvents` / `notifyAt` 全是空的；
 3. 冷启动回看 90 秒 > 轮询间隔 60 秒，所以每个新实例都会把上一分钟那条消息再扫一遍。
 
-只靠内存去重就会「各回执一次、各派发一次」。现在的做法是把去重记在 **Cache API**
-（`msg:<message_id>` / `rcpt:<会话:代码>` / `q:<会话:代码>`，TTL 30 分钟），同 colo 内
-跨实例存活：第二个实例查到时直接返回「已被别的实例处理过」，群里一声不出。
+只靠内存去重就会「各回执一次、各派发一次」。第一层补的是 **Cache API**
+（`msg:<message_id>` / `rcpt:<会话:代码>` / `q:<会话:代码>`，TTL 30 分钟），
+但 Cache 只在同 colo 内跨实例存活；若两次执行落到不同节点，仍会各派发一次。
+第二层补的是 **GitHub Actions 幂等闸**：派发前按 `run-name` 里的 `CODES=` / `CHAT=`
+查最近 5 分钟的运行记录，同一会话 + 同一组代码已派发就跳过。
 
-对应回归测试：`node tests/test_worker_dedupe.mjs`（CI 会跑）。它用「同一份 Cache +
-两份独立模块实例」精确模拟两次冷启动。
+对应回归测试：`node tests/test_worker_dedupe.mjs`（Cache 层）与
+`node tests/test_worker_query_dedupe.mjs`（Actions 幂等层，CI 会跑）。
 
 ## 每次改 worker.js 之后
 

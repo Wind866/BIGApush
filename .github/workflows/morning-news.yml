@@ -56,6 +56,24 @@ jobs:
       # 新闻链路只需 requests，不必装整份 requirements.txt（含 akshare 等重依赖）。
       - run: pip install "requests>=2.31.0,<3"
 
+      # 当天任务当天完成：早间档主档 08:13、兜底收在 18:13。只要北京时间 < 08:00
+      # 就说明本档被调度延迟拖到了次日凌晨（旧版无此守卫，实测有次日 04:25/01:02
+      # 才起来的运行）。按规则直接判红告警、不推送、不写台账；force 人工触发不受限。
+      # 只约束 cron 兜底：Worker 准点派发的 workflow_dispatch 与人工 Run 不受此限。
+      - name: 跨日守卫（当天任务当天完成）
+        id: crossday
+        if: github.event_name == 'schedule' && inputs.force != true
+        run: |
+          HOUR=$(TZ=Asia/Shanghai date +%H)
+          if [ "$HOUR" -lt 8 ]; then
+            NOW=$(TZ=Asia/Shanghai date +'%F %H:%M')
+            REASON="早间新闻任务跨日运行：北京时间 $NOW 才触发，已过当日 08:13~18:13 档期窗口；按「当天任务当天完成」规则跳过推送并告警"
+            echo "CROSS_REASON=$REASON" >> "$GITHUB_ENV"
+            echo "::error::$REASON"
+            exit 1
+          fi
+          echo "当天运行，跨日守卫通过（北京时间 $(TZ=Asia/Shanghai date +'%F %H:%M')）"
+
       # 补档是按计划执行的，不该被标成「主档迟到 60 分钟」。
       # 用 github.event.schedule 精确映射本档计划时刻，写入 GITHUB_ENV 供推送脚本
       # 标注数据时点；手动 dispatch 时本步跳过，脚本不做延迟判定。
@@ -88,7 +106,7 @@ jobs:
         if: failure()
         uses: ./.github/actions/alert
         with:
-          message: "⚠️ 早间新闻任务运行失败，请查看日志"
+          message: "${{ env.CROSS_REASON || '⚠️ 早间新闻任务运行失败，请查看日志' }}"
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       - name: 超时 / 取消兜底告警
         if: always() && job.status == 'cancelled'

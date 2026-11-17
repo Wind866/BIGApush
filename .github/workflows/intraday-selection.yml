@@ -3,7 +3,8 @@ name: 盘中选股
 # 北京时间 = UTC+8。12:53 盘中快照（周一至周五），节假日由脚本自动跳过。
 # 分钟数避开 :00 / :30，与 limit-up-relay 的 18:53 收盘档互不干扰（其 12:33 盘中档已下线）。
 # 准点由 Cloudflare Worker 触发；GitHub cron 只作兜底。
-# 迟到不再拦截推送（见脚本内说明），重复由台账幂等守卫负责。
+# 同日迟到不拦截（快照会标注真实数据时点），但跨日运行由「跨日守卫」判红告警、不补跑；
+# 重复由台账幂等守卫负责。
 #
 # 兜底铺到 +6h（18:53）。盘中快照时效性强，再晚的数据参考价值很低，
 # 所以不像新闻类档期那样铺到 +10h；卡片会标注真实数据时点。
@@ -48,6 +49,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      # 当天任务当天完成：盘中档主档 12:53、兜底收在 18:53。北京时间 < 12:00
+      # 触发说明被调度延迟拖到了次日凌晨。按规则判红告警、不采集不推送、不写台账；
+      # 盘中快照时效性强，跨日补跑意义不大，宁可告警也不静默补跑。
+      # force 人工触发 / Worker 准点 workflow_dispatch 不受此限。
+      - name: 跨日守卫（当天任务当天完成）
+        id: crossday
+        if: github.event_name == 'schedule' && inputs.force != true
+        run: |
+          HOUR=$(TZ=Asia/Shanghai date +%H)
+          if [ "$HOUR" -lt 12 ]; then
+            NOW=$(TZ=Asia/Shanghai date +'%F %H:%M')
+            REASON="盘中选股任务跨日运行：北京时间 $NOW 才触发，已过当日 12:53~18:53 档期窗口；按「当天任务当天完成」规则跳过推送并告警"
+            echo "CROSS_REASON=$REASON" >> "$GITHUB_ENV"
+            echo "::error::$REASON"
+            exit 1
+          fi
+          echo "当天运行，跨日守卫通过（北京时间 $(TZ=Asia/Shanghai date +'%F %H:%M')）"
+
       # 补档按计划执行，不该被写成「主档迟到 60 分钟」而误导看卡片的人。
       - name: 推导本档计划时刻
         if: github.event_name == 'schedule'
@@ -87,7 +106,7 @@ jobs:
         if: failure()
         uses: ./.github/actions/alert
         with:
-          message: "⚠️ 盘中选股任务运行失败，请查看日志"
+          message: "${{ env.CROSS_REASON || '⚠️ 盘中选股任务运行失败，请查看日志' }}"
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       - name: 超时 / 取消兜底告警
         if: always() && job.status == 'cancelled'

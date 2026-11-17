@@ -66,17 +66,19 @@ jobs:
           esac
           echo "EXPECT_HHMM=$planned" >> "$GITHUB_ENV"
 
-      # 当天任务当天完成：晚间档计划当天 21:53~23:53 完成。若北京时间已过午夜
-      # （00:00~07:59）才真正跑起来，说明本档被调度延迟拖到次日 —— 按规则直接判红，
-      # 由下方 failure() 告警带出原因，不采集、不推送、不写台账。force 人工触发不受限。
+      # 当天任务当天完成：晚间档计划当天 21:53~23:53 完成。主档 21:53、兜底收在 23:53，
+      # 正常情况下北京时间小时数必为 21~23；只要 < 21 就说明本档被调度延迟拖到了次日，
+      # 按规则直接判红，由下方 failure() 告警带出原因，不采集、不推送、不写台账。
+      # 旧版只判 < 8，实测有 09:06 才起来的次日运行漏过守卫（延迟超 10h），故收紧到 < 21。
+      # 只约束 cron 兜底：Worker 准点派发的 workflow_dispatch 与人工 Run 不受此限。
       - name: 跨日守卫（当天任务当天完成）
         id: crossday
-        if: inputs.force != true
+        if: github.event_name == 'schedule' && inputs.force != true
         run: |
           HOUR=$(TZ=Asia/Shanghai date +%H)
-          if [ "$HOUR" -lt 8 ]; then
+          if [ "$HOUR" -lt 21 ]; then
             NOW=$(TZ=Asia/Shanghai date +'%F %H:%M')
-            REASON="晚间新闻任务跨日运行：北京时间 $NOW 才触发，已超过当天（计划 21:53~23:53）；按「当天任务当天完成」规则跳过推送并告警"
+            REASON="晚间新闻任务跨日运行：北京时间 $NOW 才触发，已过当天 21:53~23:53 档期窗口；按「当天任务当天完成」规则跳过推送并告警"
             echo "CROSS_REASON=$REASON" >> "$GITHUB_ENV"
             echo "::error::$REASON"
             exit 1

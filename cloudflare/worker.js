@@ -74,7 +74,17 @@ const API = "https://api.github.com";
 // 飞书轮询 / 事件回调 / 不同 CF 实例可能把同一条查询派发两次；现在派发前先查
 // stock-query.yml 的运行页标题（run-name 里的 CODES/CHAT），5 分钟内同代码同会话
 // 已有 dispatch 就只回执、不再触发，避免群里出现两份相同结论。
-const BUILD = "2026-11-17.1";
+// 2026-11-17.4：在 17.1 的 GitHub 守卫之上补两件事。
+// 17.1 的守卫只在 dispatchQuery 里生效，回执在它之前就发出去了，而回执的去重
+// 依赖 Cache API —— scheduled 上下文里 Cache 不保证可见，写入也没有确认。
+// 于是线上仍是「两条已收到 + 两张图」里至少两条已收到：实测 11-17 14:46:51 与
+// 14:47:51 一对运行记录（间隔正好 60 秒 = 一次 cron），当时线上还是 16.2 版。
+// 现在把守卫提前到回执之前，命中即回执与派发都不做；顺带解决「派发返回 5xx
+// 但 GitHub 其实已受理」的二义性 —— 重试前会先撞上这道闸，不会二次出图。
+// 另外补上 D1 原子认领（可选，绑定 DB 才启用）：Cache 在 scheduled 上下文
+// 可能整个不可见，主键冲突才是跨实例的确定判据；未绑定时降级为前两层，
+// /health 与 /feishu/poll 都标 dedupeBackend=none，不静默。
+const BUILD = "2026-11-17.4";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -541,6 +551,82 @@ async function dedupeDel(key) {
     // 删不掉就让它在 TTL 后自然过期
   }
 }
+
+// ---- 跨实例去重（D1，权威）-------------------------------------------------
+// 为什么还要 D1：上面的 Cache 只保证「同 colo 内大概率可见」，而 cron 每分钟
+// 可能落在不同 colo，scheduled 上下文里连 caches.default 都不一定有。回执能不能
+// 只发一条，必须有一个**原子**的判据 —— INSERT OR IGNORE 的主键冲突就是。
+//
+// 它是可选的：没绑定 DB 时整体降级为「Cache + GitHub 守卫」两层，不会报错，
+// 但 /feishu/poll 与 /health 会明确标出 dedupeBackend=none，不静默。
+//
+// 建表 SQL（D1 Console 里执行一次）：
+//   CREATE TABLE IF NOT EXISTS feishu_msg (
+//     msg_id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, codes TEXT NOT NULL,
+//     at INTEGER NOT NULL, receipt_sent INTEGER NOT NULL DEFAULT 0,
+//     dispatched INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0
+//   );
+//   CREATE INDEX IF NOT EXISTS idx_feishu_msg_at ON feishu_msg(at);
+async function claimMessage(env, msgId, chatId, codes) {
+  if (!msgId) return { claimed: true, degraded: true };
+  if (!env.DB) return { claimed: true, degraded: true }; // 由 Cache + GitHub 守卫兜底
+  try {
+    const res = await env.DB.prepare(
+      `INSERT OR IGNORE INTO feishu_msg (msg_id, chat_id, codes, at, receipt_sent, dispatched, attempts)
+       VALUES (?, ?, ?, ?, 0, 0, 0)`,
+    ).bind(msgId, chatId, codes, Date.now()).run();
+    // 只有明确返回 0 才算被别人抢先。changes 缺失时按成功处理 ——
+    // 把真实查询误判成重复的代价是用户白等，反过来最多多发一条回执。
+    const changes = res && res.meta ? res.meta.changes : undefined;
+    return { claimed: changes !== 0, degraded: false };
+  } catch (err) {
+    // 存储故障时宁可重复也不能漏答：降级，但必须留痕
+    console.error(`[DEDUPE] D1 异常，降级为 Cache + 守卫：${err}`);
+    return { claimed: true, degraded: true };
+  }
+}
+
+/** 只更新白名单字段，避免 SQL 列名来自外部输入 */
+async function markFeishuMsg(env, msgId, fields) {
+  if (!env.DB || !msgId || !fields) return;
+  const allowed = ["receipt_sent", "dispatched", "attempts"];
+  const keys = Object.keys(fields).filter((k) => allowed.includes(k));
+  if (!keys.length) return;
+  const sets = keys.map((k) => `${k} = ?`).join(", ");
+  try {
+    await env.DB.prepare(`UPDATE feishu_msg SET ${sets} WHERE msg_id = ?`)
+      .bind(...keys.map((k) => fields[k]), msgId).run();
+  } catch (err) {
+    console.error(`[DEDUPE] 台账更新失败：${err}`);
+  }
+}
+
+/** 撤销认领：只在「确定没派出去」时调用，让下一轮能重试 */
+async function releaseMessage(env, msgId) {
+  if (!env.DB || !msgId) return;
+  try {
+    await env.DB.prepare("DELETE FROM feishu_msg WHERE msg_id = ?").bind(msgId).run();
+  } catch (err) {
+    console.error(`[DEDUPE] 撤销认领失败：${err}`);
+  }
+}
+
+/** 只保留 3 天，避免台账无限增长 */
+async function cleanupFeishuMsg(env) {
+  if (!env.DB) return;
+  try {
+    const res = await env.DB.prepare("DELETE FROM feishu_msg WHERE at < ?")
+      .bind(Date.now() - 3 * 86400 * 1000).run();
+    const n = (res && res.meta && res.meta.changes) || 0;
+    if (n) console.log(`[DEDUPE] 清理过期台账 ${n} 行`);
+  } catch (err) {
+    console.error(`[DEDUPE] 清理失败：${err}`);
+  }
+}
+
+function dedupeBackend(env) {
+  return env && env.DB ? "d1" : "none";
+}
 let feishuTokenCache = { token: "", exp: 0 };
 
 async function sha256Hex(text) {
@@ -708,10 +794,29 @@ async function dispatchQuery(env, codes, chatId) {
           ? `HTTP 404（仓库或工作流文件名不对：${owner}/${repo}/actions/workflows/${workflow}）${body}`
           : `HTTP ${res.status} ${body}`;
     noteFailure("派发 Actions", detail);
-    return { ok: false, detail };
+    // unknown：请求可能已经到达 GitHub 并被受理，只是响应没回来。
+    // 这种情况下重试 = 第二次真实执行 = 第二张报价不同的图，所以不能重试。
+    // 401/403/404 是确定没派出去，可以安全重试。
+    return { ok: false, detail, unknown: res.status >= 500 || res.status === 429 };
   } catch (err) {
     noteFailure("派发 Actions", err);
-    return { ok: false, detail: String(err) };
+    // 网络异常同理：不知道 GitHub 有没有收到
+    return { ok: false, detail: String(err), unknown: true };
+  }
+}
+
+/** handleQuery 用：把 GitHub 的运行记录当作权威闸。
+ *  查不到（无 GH_TOKEN / 网络故障）时返回 false —— 宁可重复一次，也不能让查询
+ *  石沉大海；那一层的风险由 D1 认领兜住。 */
+async function recentQueryExists(env, codes, chatId) {
+  try {
+    const headers = await authHeaders(env);
+    const [repo, workflow] = QUERY_TARGET.split("/");
+    return await queryDispatchedRecently(
+      env, headers, (env.OWNER || "Wind866").trim(), repo, workflow, codes, chatId,
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -763,8 +868,9 @@ const NOTIFY_GAP_MS = 5 * 60 * 1000;
  *
  * 返回 { ok, skipped, receipt, dispatch }，skipped 取值：
  *   ""          正常处理
- *   "duplicate" 这条消息已被别的实例处理完，本次什么都不做
+ *   "duplicate" 这条消息已被处理过（D1 认领 / Cache 命中），本次什么都不做
  *   "cooldown"  同代码 90 秒内刚派发过，只回一句提示
+ *   "recent"    5 分钟内已有同一会话 + 同一组代码的 dispatch，回执与派发都不做
  */
 async function handleQuery(env, codes, chatId, msgKey = "") {
   const key = codes.join(",");
@@ -784,6 +890,19 @@ async function handleQuery(env, codes, chatId, msgKey = "") {
     await dedupeSet(`msg:${msgKey}`, String(now));
   }
 
+  // ①.5 D1 原子认领：Cache 可能整个不可见，主键冲突才是跨实例的确定判据。
+  //     顺序在回执之前 —— 回执一旦发出去就收不回来，两条「已收到」正是这样来的。
+  const claim = await claimMessage(env, msgKey, chatId, key);
+  if (!claim.claimed) {
+    console.log(`[FEISHU] 消息 ${msgKey} 已被认领，跳过（${dedupeBackend(env)}）`);
+    return {
+      ok: true,
+      skipped: "duplicate",
+      receipt: { ok: true, detail: "" },
+      dispatch: { ok: true, detail: "" },
+    };
+  }
+
   // ② 代码级冷却：实例内的 Map 冷启动会丢，所以再查一层 Cache（跨实例生效）
   const last = Math.max(
     seenEvents.get(`q:${chatId}:${key}`) || 0,
@@ -792,6 +911,21 @@ async function handleQuery(env, codes, chatId, msgKey = "") {
   if (now - last < CODE_COOLDOWN_MS) {
     const receipt = await feishuSend(env, chatId, `⏳ ${key} 刚查过，结果约 1 分钟到，请稍等`);
     return { ok: true, skipped: "cooldown", receipt, dispatch: { ok: true, detail: "" } };
+  }
+
+  // ③ 权威闸（放在回执之前）：GitHub 上已有同一会话 + 同一组代码的 dispatch，
+  //    说明这条消息已经被处理过 —— 回执与派发都不做。
+  //    这一层不依赖 Cache 也不依赖 D1，查的是 GitHub 本身，跨实例、跨 colo、
+  //    跨通道（轮询 / 事件回调）都成立。同时它让「派发返回 5xx 但 GitHub 其实
+  //    已受理」变得安全：重试前先撞上这道闸，不会二次出图。
+  if (await recentQueryExists(env, codes, chatId)) {
+    console.log(`[FEISHU] ${key} 5 分钟内已派发过，回执与派发都跳过`);
+    return {
+      ok: true,
+      skipped: "recent",
+      receipt: { ok: true, detail: "", skipped: true },
+      dispatch: { ok: true, detail: "" },
+    };
   }
 
   const nkey = `${chatId}|${key}`;
@@ -817,12 +951,23 @@ async function handleQuery(env, codes, chatId, msgKey = "") {
     // 冷却只在真正派发成功（或幂等确认已有同单）后才记，否则失败一次就会把后续重试全挡掉
     seenEvents.set(`q:${chatId}:${key}`, Date.now());
     await dedupeSet(`q:${chatId}:${key}`, String(Date.now()));
+    await markFeishuMsg(env, msgKey, { dispatched: 1, receipt_sent: fresh ? 1 : 0 });
     if (seenEvents.size > 200) seenEvents.clear();
   } else {
-    // 派发失败：撤掉消息占位，让下一轮（或另一个实例）还能重试
+    // 派发失败：撤销占位与认领，让下一轮（或另一个实例）还能重试。
+    // 重试在这里是安全的 —— ③ 的 GitHub 守卫会先跑：如果上一次其实已被受理，
+    // 那条运行记录就已经在，守卫会拦住，不会二次出图。这正是 17.1 那版守卫
+    // 原本做不到的（它只在 dispatchQuery 内部生效，回执已经先发出去了）。
     if (msgKey) await dedupeDel(`msg:${msgKey}`);
+    await releaseMessage(env, msgKey);
     if (fresh) {
-      await feishuSend(env, chatId, `❌ 触发分析任务失败：${dispatched.detail}`);
+      await feishuSend(
+        env,
+        chatId,
+        dispatched.unknown
+          ? `❌ 触发分析任务失败：${dispatched.detail}\n（网络或 GitHub 5xx，结果未知：可能其实已在跑。请先等 2 分钟看有没有出图，不要重复发代码）`
+          : `❌ 触发分析任务失败：${dispatched.detail}`,
+      );
     }
   }
   return { ok: dispatched.ok, skipped: dispatched.skipped || "", receipt, dispatch: dispatched };
@@ -892,7 +1037,9 @@ async function feishuRecentMessages(env, chatId) {
   url.searchParams.set("container_id_type", "chat");
   url.searchParams.set("container_id", chatId);
   url.searchParams.set("sort_type", "ByCreateTimeDesc");
-  url.searchParams.set("page_size", "20");
+  // 50 是接口上限：活跃群里 3 分钟可能有几十条，取 20 会把用户那条提问挤出本页，
+  // 表现为「明明发了却查不到」。
+  url.searchParams.set("page_size", "50");
   const res = await fetch(url.toString(), { headers: { authorization: `Bearer ${token}` } });
   const data = await res.json();
   if (data.code !== 0) throw new Error(`im/v1/messages 失败 ${data.code} ${data.msg}`);
@@ -993,6 +1140,12 @@ async function pollFeishu(env) {
   // 只处理最近一段时间的消息。接口返回的 create_time 是**毫秒**时间戳字符串，
   // 这里本地过滤，不用 start_time 参数（那个参数的单位和「是否必须成对」都容易踩坑）。
   const from = Math.max(Date.now() - POLL_WINDOW_MS, pollBootAt - POLL_FIRST_LOOKBACK_MS);
+
+  // 去重后端一眼可见：none 表示没绑 D1，只剩 Cache + GitHub 守卫两层
+  const backend = dedupeBackend(env);
+  report.push(backend === "d1"
+    ? "去重后端：D1（原子认领）+ GitHub 守卫 + Cache 快速路径"
+    : "⚠️ 去重后端：none（未绑定 DB）—— 仅剩 Cache + GitHub 守卫，仍可能重复");
 
   const bot = await feishuBotInfo(env);
   report.push(`机器人：${bot.name || "(未命名)"} open_id=${bot.id || "?"}`);
@@ -1151,6 +1304,7 @@ export default {
     // 每日令牌自检（不占用 cron 额度，就是每分钟唤醒里的一分钟）
     if (bj.hhmm === "08:00") {
       ctx.waitUntil(tokenSelfCheck(env));
+      ctx.waitUntil(cleanupFeishuMsg(env));
     }
 
     const hit = PLAN.find((s) => s.at === bj.hhmm && matches(s, bj));
@@ -1319,6 +1473,7 @@ export default {
         adminToken: Boolean((env.ADMIN_TOKEN || "").trim()),
         feishuApp: Boolean((env.FEISHU_APP_ID || "").trim()),
         feishuPollEveryMin: POLL_EVERY_MIN,
+        dedupeBackend: dedupeBackend(env),
         note: "根路径不会触发任务；/test?at=HH:MM&key=… 手动测某档期，/health?check=1 校验 token；build 与 alertSignSupported 用于核对线上是否为此版代码",
       });
     }

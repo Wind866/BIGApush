@@ -7,7 +7,8 @@
  *
  * 部署（全程 Cloudflare 网页后台，零命令行）：
  *   1. Workers & Pages → Create → Worker → 粘贴本文件内容 → Deploy
- *   2. 该 Worker → Settings → Bindings → Add → AI → Variable name 填 AI → Save
+ *   2. 该 Worker → Settings → Bindings → Add binding → Workers AI → Variable name 填 AI → Save
+ *      （列表里选带星标的 "Workers AI"，不是 "AI Search"；变量名必须是 AI）
  *   3. Settings → Variables → 加 SUMMARY_TOKEN（可选，Bearer 鉴权；加了则
  *      调用方必须在 Authorization 头带同值）
  *   4. 复制 Worker 的 *.workers.dev URL，存进 GitHub Secrets：AI_SUMMARY_URL
@@ -17,7 +18,14 @@
  * 模型可改：MODEL 常量换成任意 Workers AI 文本模型 ID。
  */
 
-const MODEL = "@cf/qwen/qwen3-30b-a3b";
+// 主模型：智谱 GLM-4.7-Flash（中文好、无下线计划、支持 response_format json_object）。
+// 旧写法 @cf/qwen/qwen3-30b-a3b 已不存在（正确带 -fp8 且 2026-11-20 下线），故弃用。
+// MODELS 按顺序尝试，某个模型下线/报错会自动换下一个，避免整条链路因单模型失效而断。
+const MODELS = [
+  "@cf/zai-org/glm-4.7-flash",
+  "@cf/qwen/qwen3-30b-a3b-fp8",
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+];
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -66,28 +74,43 @@ export default {
       return json({ error: "AI binding not configured" }, 500);
     }
 
-    try {
-      const result = await env.AI.run(MODEL, {
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-        max_tokens: 800,
-        temperature: 0.2,
-      });
+    // 依次尝试各模型：任一下线/报错/返回空，自动换下一个。
+    let lastErr = "unknown";
+    for (const model of MODELS) {
+      try {
+        const inputs = {
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          max_tokens: 900,
+          temperature: 0.2,
+        };
+        // GLM 支持 response_format，强制 JSON 输出，便于 Python 端稳定解析四段文字。
+        if (model.startsWith("@cf/zai-org/")) {
+          inputs.response_format = { type: "json_object" };
+        }
 
-      // Workers AI 文本模型把回答放在 response 字段
-      const text =
-        typeof result === "string"
-          ? result
-          : result.response || result.result || "";
+        const result = await env.AI.run(model, inputs);
 
-      if (!text) {
-        return json({ error: "empty model response", raw: result }, 502);
+        // 不同模型返回字段不一：response / result，OpenAI 兼容模型在 choices[0].message.content。
+        let text =
+          typeof result === "string"
+            ? result
+            : result.response || result.result || "";
+        if (!text && result && Array.isArray(result.choices)) {
+          const msg = result.choices[0] && result.choices[0].message;
+          text = (msg && msg.content) || "";
+        }
+
+        if (text) {
+          return json({ text, model });
+        }
+        lastErr = "empty response from " + model;
+      } catch (err) {
+        lastErr = model + ": " + String(err);
       }
-      return json({ text });
-    } catch (err) {
-      return json({ error: "model invocation failed", detail: String(err) }, 502);
     }
+    return json({ error: "all models failed", detail: lastErr }, 502);
   },
 };

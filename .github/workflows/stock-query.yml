@@ -106,7 +106,15 @@ jobs:
                       )
                       if created < cutoff:
                           continue
-                      title = run.get("name") or run.get("display_title") or ""
+                      # 上一次失败/取消就允许重试：否则数据源抖动一次，这只票 5 分钟内都查不了。
+                      # conclusion 为 None 表示仍在运行 —— 此时跳过是对的，结果马上就到。
+                      if run.get("conclusion") not in (None, "", "success"):
+                          continue
+                      # 必须 display_title 在前：name 是工作流名（「个股深度分析 · 查询即推送」），
+                      # 只有 display_title 才是 run-name 里的「个股查询 CODES=… CHAT=…」。
+                      # 旧顺序用 `name or display_title`，name 永远非空 → 正则永远匹配不到
+                      # CODES= → skip 恒为 False，守卫自上线起从未拦住过任何一次重复。
+                      title = run.get("display_title") or run.get("name") or ""
                       m_codes = re.search(r"CODES=(\S*)", title)
                       m_chat = re.search(r"CHAT=(\S*)", title)
                       if not m_codes or norm_codes(m_codes.group(1)) != codes:

@@ -25,10 +25,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import requests
 
+BJ_TZ = timezone(timedelta(hours=8))
 TIMEOUT = 20
 DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
@@ -239,6 +241,38 @@ def _via_template(facts: Dict[str, Any], news: List[dict]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------- 最新动态日期
+
+def _news_publish_time(news: List[dict]) -> str:
+    """取最新一条新闻的发布时间，归一化成「YYYY-MM-DD HH:MM」（带年份）。
+
+    - 只识别 news 里的真实 time 字段，绝不交给 LLM 生成，杜绝编造日期。
+    - 东财给到时分则用时分（如 "2026-11-17 09:42"）；只有日期则只显示日期。
+    - 只有「MM-DD」缺年份时按当前年补齐；无法识别则返回空串（卡片不显示日期）。
+    """
+    if not news:
+        return ""
+    raw = str(news[0].get("time") or "").strip()
+    if not raw:
+        return ""
+    m = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", raw)
+    if m:
+        y, mo, d, hh, mm = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4), m.group(5)
+        out = f"{y}-{mo:02d}-{d:02d}"
+        if hh is not None and mm is not None:
+            out += f" {int(hh):02d}:{mm}"
+        return out
+    m = re.search(r"(\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?", raw)
+    if m:
+        y = datetime.now(BJ_TZ).year
+        mo, d, hh, mm = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
+        out = f"{y}-{mo:02d}-{d:02d}"
+        if hh is not None and mm is not None:
+            out += f" {int(hh):02d}:{mm}"
+        return out
+    return ""
+
+
 # ---------------------------------------------------------------- 统一入口
 
 def summarize_insights(facts: Dict[str, Any], news: List[dict] | None = None) -> Dict[str, Any]:
@@ -251,16 +285,22 @@ def summarize_insights(facts: Dict[str, Any], news: List[dict] | None = None) ->
         ("Cloudflare Workers AI", lambda: _via_cloudflare(user_payload, has_news)),
         ("DeepSeek", lambda: _via_deepseek(user_payload, has_news)),
     )
+    result: Dict[str, Any] | None = None
     for label, fn in channels:
         try:
             result = fn()
             print(f"[INSIGHT] {label} 生成成功")
-            return result
+            break
         except Exception as exc:  # noqa: BLE001  单通道失败换下一个
             print(f"::warning::{label} 不可用（{type(exc).__name__}: {exc}），尝试下一个通道")
 
-    print("[INSIGHT] LLM 通道均不可用，改用本地模板兜底")
-    return _via_template(facts, news)
+    if result is None:
+        print("[INSIGHT] LLM 通道均不可用，改用本地模板兜底")
+        result = _via_template(facts, news)
+
+    # 日期来自真实新闻发布时间，与 latest 内容同源；没有 latest 就不显示日期。
+    result["latest_time"] = _news_publish_time(news) if result.get("latest") else ""
+    return result
 
 
 if __name__ == "__main__":

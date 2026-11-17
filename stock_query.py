@@ -272,7 +272,8 @@ def format_stock(index: int, code: str, result: dict, quote: dict,
                 lines.append(f"   • 利好{i}：{c}")
         if insights.get("latest"):
             lines.append("   ── 最新动态 ──")
-            lines.append(f"   • {insights['latest']}")
+            lt = insights.get("latest_time")
+            lines.append(f"   • {insights['latest']}" + (f"（{lt}）" if lt else ""))
 
     return "\n".join(lines)
 

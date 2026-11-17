@@ -55,9 +55,13 @@ jobs:
       - name: Worker 轮询去重回归（同一件事只做一次）
         run: node tests/test_worker_dedupe.mjs
 
-      # 补齐 Cache 之外的两层：D1 原子认领、GitHub 派发守卫。
-      # 仓库自带那条用例只覆盖 Cache，而线上失效的恰恰是 Cache。
-      - name: Worker 去重补充回归（D1 认领 / GitHub 守卫）
+      # 上面那条只覆盖 Cache —— 而线上失效的恰恰是 Cache。
+      # 这两条分别覆盖 GitHub 派发守卫与 D1 原子认领。
+      # 守卫测试此前已存在但没接进 CI（README 却说「CI 会跑」），一并补上。
+      - name: Worker 派发守卫回归（GitHub 运行记录幂等闸）
+        run: node tests/test_worker_query_dedupe.mjs
+
+      - name: Worker 去重补充回归（D1 原子认领 / 5xx 二义性）
         run: node tests/test_worker_dedupe_extra.mjs
 
       - name: 工作流配置解析

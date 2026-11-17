@@ -585,6 +585,10 @@ def _draw_insights(fig, insights, rect):
         ax.text(0.026, cursor, title, transform=ax.transAxes, fontsize=11,
                 color=INK, fontweight="bold", family=_font_bold or _font_name,
                 va="top")
+        # 最新动态：标题右侧标注新闻发布时间（灰色小字，来自真实新闻 time 字段）。
+        if title == "最新动态" and insights.get("latest_time"):
+            ax.text(0.97, cursor, insights["latest_time"], transform=ax.transAxes,
+                    fontsize=9, color=SUB, family=_font_name, va="top", ha="right")
         cursor -= 0.075
 
         for label, text, color in rows:

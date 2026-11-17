@@ -70,7 +70,11 @@ const API = "https://api.github.com";
 // 2026-11-16.2：接入 astock-screener 准点调度，20:33 收盘后事件采集推送；
 // GH_TOKEN 需同时勾选 astock-screener 的 Actions: Read and write，否则该档 403。
 // 档期数 9 → 10。
-const BUILD = "2026-11-16.2";
+// 2026-11-17.1：个股查询派发加 GitHub Actions 幂等守卫。
+// 飞书轮询 / 事件回调 / 不同 CF 实例可能把同一条查询派发两次；现在派发前先查
+// stock-query.yml 的运行页标题（run-name 里的 CODES/CHAT），5 分钟内同代码同会话
+// 已有 dispatch 就只回执、不再触发，避免群里出现两份相同结论。
+const BUILD = "2026-11-17.1";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -623,6 +627,52 @@ async function feishuSend(env, chatId, text) {
   }
 }
 
+// 派发后 5 分钟内，同一会话 + 同一组代码只算一次查询。
+// CF 的 Cache API 只在同 colo 有效，轮询与事件回调也可能各跑一遍，
+// 所以用 GitHub Actions 的运行记录做最后一道幂等闸。
+const QUERY_DEDUPE_MS = 5 * 60 * 1000;
+
+/** 运行标题里的 CODES=... CHAT=... 取出来；run-name 没生效时返回空串。 */
+function parseRunTitle(title) {
+  const text = String(title || "");
+  const codes = text.match(/CODES=(\S+)/)?.[1] || "";
+  const chat = text.match(/CHAT=(\S+)/)?.[1] || "";
+  return { codes, chat };
+}
+
+/** 两组代码视为同一单：顺序不同也算同一组。 */
+function sameCodeSet(a, b) {
+  const norm = (arr) => [...new Set(arr || [])].sort().join(",");
+  return norm(a) === norm(b) && norm(a).length > 0;
+}
+
+/**
+ * 最近 5 分钟内是否已经派发过同一会话 + 同一组代码的 stock-query。
+ * 查不到 API 时返回 false —— 照常派发，宁可重复也不让用户的查询石沉大海。
+ */
+async function queryDispatchedRecently(env, headers, owner, repo, workflow, codes, chatId) {
+  try {
+    const res = await fetch(
+      `${API}/repos/${owner}/${repo}/actions/workflows/${workflow}/runs?per_page=20`,
+      { headers },
+    );
+    if (!res.ok) return false;
+    const data = await res.json();
+    const cutoff = Date.now() - QUERY_DEDUPE_MS;
+    return (data.workflow_runs || []).some((r) => {
+      if (r.event !== "workflow_dispatch") return false;
+      if (new Date(r.created_at).getTime() <= cutoff) return false;
+      const { codes: titleCodes, chat: titleChat } = parseRunTitle(r.name || r.display_title);
+      if (!sameCodeSet(extractCodes(titleCodes), codes)) return false;
+      // 网页手动派发没有 chat_id，不拦截来自飞书的查询；两边都有值时必须一致。
+      if (chatId && titleChat && titleChat !== chatId) return false;
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
 /** 带 inputs 的 dispatch（dispatchOne 故意不传 inputs，这里需要传代码与 chat_id） */
 async function dispatchQuery(env, codes, chatId) {
   const owner = (env.OWNER || "Wind866").trim();
@@ -631,6 +681,11 @@ async function dispatchQuery(env, codes, chatId) {
   const [repo, workflow] = QUERY_TARGET.split("/");
   try {
     const headers = await authHeaders(env);
+    // 最后一道幂等闸：API 上已有同一会话 + 同一组代码的 dispatch 就不再推第二遍。
+    if (await queryDispatchedRecently(env, headers, owner, repo, workflow, codes, chatId)) {
+      console.log(`[FEISHU] ${codes.join(",")} 5 分钟内已派发过，跳过重复 dispatch`);
+      return { ok: true, skipped: "recent", detail: "5 分钟内同一查询已派发" };
+    }
     const res = await fetch(
       `${API}/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`,
       {
@@ -759,7 +814,7 @@ async function handleQuery(env, codes, chatId, msgKey = "") {
 
   const dispatched = await dispatchQuery(env, codes, chatId);
   if (dispatched.ok) {
-    // 冷却只在真正派发成功后才记，否则失败一次就会把后续重试全挡掉
+    // 冷却只在真正派发成功（或幂等确认已有同单）后才记，否则失败一次就会把后续重试全挡掉
     seenEvents.set(`q:${chatId}:${key}`, Date.now());
     await dedupeSet(`q:${chatId}:${key}`, String(Date.now()));
     if (seenEvents.size > 200) seenEvents.clear();
@@ -770,7 +825,7 @@ async function handleQuery(env, codes, chatId, msgKey = "") {
       await feishuSend(env, chatId, `❌ 触发分析任务失败：${dispatched.detail}`);
     }
   }
-  return { ok: dispatched.ok, skipped: "", receipt, dispatch: dispatched };
+  return { ok: dispatched.ok, skipped: dispatched.skipped || "", receipt, dispatch: dispatched };
 }
 
 // ===== 轮询模式：Worker 主动去群里捞「@机器人 + 6 位代码」 =====
@@ -1000,7 +1055,12 @@ async function pollFeishu(env) {
           pollSeen.set(id, Date.now());
           handled += 1;
           const note = r.receipt && r.receipt.ok ? "" : `（回执没发出去：${(r.receipt || {}).detail || "未知"}）`;
-          report.push(`      ↳ ${r.skipped === "cooldown" ? "刚查过，跳过派发" : "已派发"} ${v.codes.join(",")}${note}`);
+          const action = r.skipped === "cooldown"
+            ? "刚查过，跳过派发"
+            : r.skipped === "recent"
+              ? "5 分钟内已有同单，跳过重复派发"
+              : "已派发";
+          report.push(`      ↳ ${action} ${v.codes.join(",")}${note}`);
         } else {
           // 不记入 pollSeen，下一轮自动重试
           report.push(`      ↳ 派发失败：${r.dispatch.detail}（下一轮重试）`);

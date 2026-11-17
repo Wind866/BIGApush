@@ -383,12 +383,9 @@ class DataCollectionService:
         except ImportError:
             pass
     
-    def _add_init_log(self, message: str):
-        """添加初始化日志"""
-        log_entry = f"{datetime.now().strftime('%H:%M:%S')} - {message}"
-        self.init_status['logs'].append(log_entry)
-        logger.info(message)
-    
+    # 注意：_add_init_log 定义在文件末尾。此处曾有一份带时间戳前缀的同名实现，
+    # 因后定义覆盖前定义而从未生效（Python 类体顺序执行，后者胜出），已删除。
+    # 若需恢复时间戳，请改末尾那一份，不要在这里再放一份。
     def start_initialization(self, init_type: str = 'full', options: Optional[Dict] = None):
         """
         开始数据初始化

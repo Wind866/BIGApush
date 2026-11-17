@@ -5,7 +5,24 @@
 """
 
 import base64
-from cryptography.fernet import Fernet
+
+
+def _fernet_cls():
+    """惰性取出 cryptography 的 Fernet 类。
+
+    cryptography 不在 requirements.txt 中（属未声明依赖），因此**不得在模块级导入**：
+    那会让本模块以及任何 import 它的调用方直接 ImportError。改为首次使用时导入，
+    缺包时抛出带安装指引的 RuntimeError，而不是让整个模块不可用。
+    """
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError as exc:
+        raise RuntimeError(
+            "CryptoUtils 依赖 cryptography 包，但它没有列在 requirements.txt 中。"
+            "请先执行 pip install cryptography"
+        ) from exc
+    return Fernet
+
 
 class CryptoUtils:
     """加密工具类
@@ -21,7 +38,7 @@ class CryptoUtils:
     DEFAULT_KEY = None
 
     @staticmethod
-    def _build_fernet(key, action: str) -> Fernet:
+    def _build_fernet(key, action: str):
         """统一校验密钥；不合法就报错，绝不静默换密钥。"""
         if key is None:
             raise RuntimeError(
@@ -32,7 +49,7 @@ class CryptoUtils:
         if isinstance(key, str):
             key = key.encode("utf-8")
         try:
-            return Fernet(key)
+            return _fernet_cls()(key)
         except (ValueError, TypeError) as exc:
             raise ValueError(
                 f"CryptoUtils.{action}() 的密钥不合法，需要 44 字符 urlsafe-base64"
@@ -46,7 +63,7 @@ class CryptoUtils:
         Returns:
             32字节的URL安全base64编码密钥
         """
-        return Fernet.generate_key()
+        return _fernet_cls().generate_key()
 
     @staticmethod
     def encrypt(data: str, key: bytes = None) -> str:

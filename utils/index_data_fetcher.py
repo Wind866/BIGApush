@@ -1,7 +1,12 @@
 """
 指数数据获取模块 - 获取指数历史数据并计算收益率
+
+注意：tushare 不在 requirements.txt 中（属未声明依赖），因此**不得在模块级导入**。
+本模块曾被 utils/risk_controller.py 在模块级导入，导致风控模块整体 ImportError，
+表现为 web 端风控接口与 data_collection_service「第10步」长期静默失败。
+现在改为在 fetch_index_data() 内部惰性导入，未安装时只让该方法失败并打日志，
+不影响本模块与 risk_controller 的可用性。
 """
-import tushare as ts
 import pandas as pd
 import numpy as np
 import logging
@@ -98,7 +103,9 @@ class IndexDataFetcher:
             # 使用tushare获取指数数据
             logger.info(f"获取{self.index_name}指数数据: {start_date} ~ {end_date}")
             
-            # 初始化tushare
+            # 初始化tushare（惰性导入：tushare 未列入 requirements.txt，
+            # 未安装时在下方 except 中降级为「取数失败」，不拖垮整个风控模块）
+            import tushare as ts
             pro = ts.pro_api()
             
             # tushare指数数据接口（使用完整ts_code，如 932000.CSI / 000852.SH）

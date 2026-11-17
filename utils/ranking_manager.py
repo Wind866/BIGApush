@@ -1,7 +1,6 @@
-import sqlite3
 import logging
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict
 from utils.selection_record_manager import SelectionRecordManager
 from trading.stock_score_calculator import StockScoreCalculator
 from utils.akshare_fetcher import AKShareFetcher

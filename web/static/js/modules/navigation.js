@@ -150,10 +150,11 @@ function initDataUpdatePage() {
 
 /**
  * 初始化交易模块
+ *
+ * 原 /static/js/trading.js 只是一个 249 字节的空壳（函数体仅 console.log），
+ * 已随死文件清理一并删除。交易模块的前端实现目前不存在，故此处保留空实现，
+ * 让 trading / positions / transactions 三个导航分支仍可安全进入。
  */
 function initTrading(page) {
-    // 调用trading.js中的initTrading函数
-    if (typeof window.initTrading === 'function') {
-        window.initTrading(page);
-    }
+    // TODO: 交易页面前端待实现
 }

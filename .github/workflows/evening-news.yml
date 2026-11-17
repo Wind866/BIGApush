@@ -4,17 +4,13 @@ name: 晚间新闻
 # 准点由 Cloudflare Worker 在 21:53 workflow_dispatch；下面的 cron 仅作兜底
 # （实测 0/34 准时，延迟 3h17m~9h43m）。脚本侧有台账幂等守卫，不会重复推送。
 #
-# 兜底窗口铺到次日 07:53（+10h）：晚间档常跨午夜才到，原来只到 +2h，
-# 真正在跑的时刻没有任何 cron 档位。台账按 slot_hour=21 归并跨日档期，
-# 补跑不会占用第二天的晚间档，也不会重复刷屏。
+# 当天任务当天完成：兜底档全部收敛在当天（最晚 23:53），不再铺次日凌晨档。
+# 若被调度延迟拖到次日才运行，由「跨日守卫」步骤判红并告警，不静默补跑前一天档期。
 on:
   schedule:
     - cron: '53 13 * * *'   # 北京 21:53 主档
     - cron: '53 14 * * *'   # 22:53
     - cron: '53 15 * * *'   # 23:53
-    - cron: '53 17 * * *'   # 次日 01:53  (+4h)
-    - cron: '53 20 * * *'   # 次日 04:53  (+7h)
-    - cron: '53 23 * * *'   # 次日 07:53  (+10h)
   workflow_dispatch:
     inputs:
       force:
@@ -56,8 +52,7 @@ jobs:
       # 新闻链路只需 requests，不必装整份 requirements.txt（含 akshare 等重依赖）。
       - run: pip install "requests>=2.31.0,<3"
 
-      # 补档按计划跑，不该被标成「主档迟到」。跨午夜的档期对应次日 HHMM，
-      # 与 push_guard 的 slot_hour=21 档期归并互不干扰（台账不看 EXPECT_HHMM）。
+      # 补档按计划跑，不该被标成「主档迟到」。所有兜底档均在当天，无跨日档。
       - name: 推导本档计划时刻
         if: github.event_name == 'schedule'
         env:
@@ -67,12 +62,26 @@ jobs:
             '53 13 * * *')  planned="2153" ;;
             '53 14 * * *')  planned="2253" ;;
             '53 15 * * *')  planned="2353" ;;
-            '53 17 * * *')  planned="0153" ;;
-            '53 20 * * *')  planned="0453" ;;
-            '53 23 * * *')  planned="0753" ;;
             *)              planned="2153" ;;
           esac
           echo "EXPECT_HHMM=$planned" >> "$GITHUB_ENV"
+
+      # 当天任务当天完成：晚间档计划当天 21:53~23:53 完成。若北京时间已过午夜
+      # （00:00~07:59）才真正跑起来，说明本档被调度延迟拖到次日 —— 按规则直接判红，
+      # 由下方 failure() 告警带出原因，不采集、不推送、不写台账。force 人工触发不受限。
+      - name: 跨日守卫（当天任务当天完成）
+        id: crossday
+        if: inputs.force != true
+        run: |
+          HOUR=$(TZ=Asia/Shanghai date +%H)
+          if [ "$HOUR" -lt 8 ]; then
+            NOW=$(TZ=Asia/Shanghai date +'%F %H:%M')
+            REASON="晚间新闻任务跨日运行：北京时间 $NOW 才触发，已超过当天（计划 21:53~23:53）；按「当天任务当天完成」规则跳过推送并告警"
+            echo "CROSS_REASON=$REASON" >> "$GITHUB_ENV"
+            echo "::error::$REASON"
+            exit 1
+          fi
+          echo "当天运行，跨日守卫通过（北京时间 $(TZ=Asia/Shanghai date +'%F %H:%M')）"
 
       - name: 推送晚间新闻
         env:
@@ -87,7 +96,7 @@ jobs:
         if: failure()
         uses: ./.github/actions/alert
         with:
-          message: "⚠️ 晚间新闻任务运行失败，请查看日志"
+          message: "${{ env.CROSS_REASON || '⚠️ 晚间新闻任务运行失败，请查看日志' }}"
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       - name: 超时 / 取消兜底告警
         if: always() && job.status == 'cancelled'

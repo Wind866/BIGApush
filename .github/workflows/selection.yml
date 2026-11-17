@@ -4,16 +4,14 @@ name: 收盘选股
 # 分钟数与 limit-up-relay 的 18:53 错开 40 分钟，避开整点拥堵。
 # 准点由 Cloudflare Worker 触发；GitHub cron 只作兜底。
 #
-# 收盘数据次日上午仍有参考价值，兜底铺到次日 01:33（+6h）；原来只有 +1h，
-# 而实测延迟 3.3~9.7 小时，兜底基本接不住。台账按 slot_hour=19 判重，
-# 多档触发会被秒级跳过。
+# 当天任务当天完成：兜底档全部收敛在当天（最晚 23:33），不再铺次日凌晨档。
+# 若被调度延迟拖到次日才运行，由「跨日守卫」步骤判红并告警，不静默补跑上一交易日。
 on:
   schedule:
     - cron: '33 11 * * 1-5'   # 北京 19:33 主档
     - cron: '33 12 * * 1-5'   # 20:33
     - cron: '33 14 * * 1-5'   # 22:33  (+3h)
     - cron: '33 15 * * 1-5'   # 23:33  (+4h)
-    - cron: '33 17 * * 1-5'   # 次日 01:33  (+6h)
   workflow_dispatch:
     inputs:
       skip_update:
@@ -82,6 +80,18 @@ jobs:
           echo "data_date=${DATA_DATE:-$TODAY}" >> "$GITHUB_OUTPUT"
           echo "catchup=${CATCHUP:-false}" >> "$GITHUB_OUTPUT"
 
+      # 当天任务当天完成：收盘定稿档计划当天 19:33~23:33 完成。交易日预检已算出
+      # catchup（数据日期 != 运行日期）。若跨日且非人工 force，直接判红并告警，
+      # 不调用 run_close_catchup.py 静默补跑上一交易日。
+      - name: 跨日守卫（当天任务当天完成）
+        id: crossday
+        if: steps.trading.outputs.is_trading == 'true' && steps.session.outputs.catchup == 'true' && inputs.force != true
+        run: |
+          REASON="收盘选股任务跨日运行：数据日期 ${{ steps.session.outputs.data_date }}，实际已于次日 $(TZ=Asia/Shanghai date +'%F %H:%M') 触发；按「当天任务当天完成」规则跳过补跑并告警"
+          echo "CROSS_REASON=$REASON" >> "$GITHUB_ENV"
+          echo "::error::$REASON"
+          exit 1
+
       - name: 调度延迟检查（仅提示，不阻断）
         if: github.event_name == 'schedule'
         env:
@@ -94,7 +104,6 @@ jobs:
             '33 12 * * 1-5')  plan="20:33" ;;
             '33 14 * * 1-5')  plan="22:33" ;;
             '33 15 * * 1-5')  plan="23:33" ;;
-            '33 17 * * 1-5')  plan="01:33" ;;
             *)                plan="19:33" ;;
           esac
           planned=$(date -d "today $plan" +%s)
@@ -208,7 +217,7 @@ jobs:
         if: failure()
         uses: ./.github/actions/alert
         with:
-          message: "⚠️ 收盘选股任务运行失败，请查看日志"
+          message: "${{ env.CROSS_REASON || '⚠️ 收盘选股任务运行失败，请查看日志' }}"
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       - name: 超时 / 取消兜底告警
         if: always() && job.status == 'cancelled'

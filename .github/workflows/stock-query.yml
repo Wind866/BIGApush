@@ -1,5 +1,9 @@
 name: 个股深度分析 · 查询即推送
 
+# 运行页标题带上代码与会话 id：Actions 列表接口不返回 workflow_dispatch 的 inputs，
+# 只能靠 run-name 给「同单 5 分钟内不重复推送」的守卫提供判重依据。
+run-name: 个股查询 CODES=${{ inputs.stocks }} CHAT=${{ inputs.chat_id || vars.FEISHU_CHAT_ID }}
+
 # 手动填股票代码 → runner 上跑真实数据取数（行情/资金流/估值/财务）
 # → 策略信号 + 买入建议 → 推送飞书群。
 #
@@ -24,9 +28,15 @@ on:
         required: false
         default: ''
         type: string
+      force:
+        description: '同单 5 分钟内强制重跑（一般不勾；用于主动复查同一只票）'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+  actions: read    # 重复查询守卫要查本 workflow 的最近运行记录
 
 concurrency:
   group: stock-query
@@ -46,10 +56,84 @@ jobs:
     # 单只约 40~60 秒（技术面 + 资金流 + 估值 + 财报各一轮取数），6 只给足余量
     timeout-minutes: 25
     steps:
+      # Worker 的轮询与事件回调可能把同一条查询派发两次；concurrency 只会排队不会去重。
+      # 这里在跑真取数之前查一次运行记录：5 分钟内同会话 + 同组代码已存在就整段跳过。
+      - name: 重复查询守卫
+        id: dedupe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+          CODES: ${{ inputs.stocks }}
+          CHAT_ID: ${{ inputs.chat_id || vars.FEISHU_CHAT_ID }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          def norm_codes(text):
+              return ",".join(sorted(set(re.findall(r"(?<!\d)\d{6}(?!\d)", text or ""))))
+
+          codes = norm_codes(os.environ.get("CODES", ""))
+          chat = (os.environ.get("CHAT_ID") or "").strip()
+          force = (os.environ.get("FORCE") or "").lower() == "true"
+          skip = False
+
+          if codes and not force:
+              try:
+                  url = (
+                      f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}"
+                      "/actions/workflows/stock-query.yml/runs?per_page=20"
+                  )
+                  req = urllib.request.Request(url, headers={
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "stock-query-dedupe",
+                  })
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      data = json.load(resp)
+
+                  cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+                  current = str(os.environ.get("CURRENT_RUN_ID", ""))
+                  for run in data.get("workflow_runs", []):
+                      if str(run.get("id")) == current:
+                          continue
+                      if run.get("event") != "workflow_dispatch":
+                          continue
+                      created = datetime.fromisoformat(
+                          str(run.get("created_at", "")).replace("Z", "+00:00")
+                      )
+                      if created < cutoff:
+                          continue
+                      title = run.get("name") or run.get("display_title") or ""
+                      m_codes = re.search(r"CODES=(\S*)", title)
+                      m_chat = re.search(r"CHAT=(\S*)", title)
+                      if not m_codes or norm_codes(m_codes.group(1)) != codes:
+                          continue
+                      title_chat = (m_chat.group(1) if m_chat else "").strip()
+                      if chat and title_chat != chat:
+                          continue
+                      skip = True
+                      print(
+                          f"::notice::5 分钟内已有同单查询（run #{run.get('run_number')}），"
+                          "本次跳过取数与推送；确需重跑请勾 force"
+                      )
+                      break
+              except Exception as exc:
+                  # 查不到就照常推送：宁可重复一次，也不能让用户的查询石沉大海
+                  print(f"::warning::重复查询守卫查询失败，照常推送：{type(exc).__name__} {exc}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"skip={'true' if skip else 'false'}\n")
+          PY
+
       - name: 检出仓库
+        if: steps.dedupe.outputs.skip != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: 准备 Python
+        if: steps.dedupe.outputs.skip != 'true'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.11'
@@ -58,10 +142,12 @@ jobs:
       # akshare 自动带 pandas/numpy/requests；PyYAML 是 utils.db_config 读 database.yaml 用的；
       # matplotlib 用于把结论画成图片卡片（不装 mplfinance，K 线自己手绘）。
       - name: 安装依赖
+        if: steps.dedupe.outputs.skip != 'true'
         run: python -m pip install -q "akshare==1.20.42" "PyYAML>=6.0,<7" "matplotlib>=3.7,<4"
 
       # 中文字体：runner 默认没有 CJK 字库，缺了会画成方块（代码里检测不到字体就自动退回文本）
       - name: 安装中文字体
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           if fc-list :lang=zh >/dev/null 2>&1 && [ -n "$(fc-list :lang=zh)" ]; then
             echo "已有中文字体，跳过安装"
@@ -72,6 +158,7 @@ jobs:
           fc-list :lang=zh | head -3 || true
 
       - name: 分析并推送飞书
+        if: steps.dedupe.outputs.skip != 'true'
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
           FEISHU_SECRET: ${{ secrets.FEISHU_SECRET }}

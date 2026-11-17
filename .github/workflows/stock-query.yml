@@ -83,6 +83,11 @@ jobs:
           STOCK_CODES: ${{ inputs.stocks }}
           PERIOD: ${{ inputs.period }}
           CARD_DIR: reports/cards
+          # 决策仪表盘文字摘要：优先 Cloudflare Workers AI（免密钥），
+          # 失败自动降级 DeepSeek，再失败用本地模板。都不配也能正常出卡片。
+          AI_SUMMARY_URL: ${{ secrets.AI_SUMMARY_URL }}
+          AI_SUMMARY_TOKEN: ${{ secrets.AI_SUMMARY_TOKEN }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python stock_query.py
 
       # 图片留在运行页，方便核对「群里看到的那张图」到底长什么样

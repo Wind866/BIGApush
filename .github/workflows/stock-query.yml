@@ -94,9 +94,25 @@ jobs:
                   with urllib.request.urlopen(req, timeout=15) as resp:
                       data = json.load(resp)
 
-                  cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
                   current = str(os.environ.get("CURRENT_RUN_ID", ""))
-                  for run in data.get("workflow_runs", []):
+                  runs = data.get("workflow_runs", [])
+
+                  # 窗口的锚点必须是「本次运行被创建的时刻」，不是「此刻」。
+                  # Actions 排队延迟实测可达 6 分钟以上：run #27 创建于 06:47:51，
+                  # job 直到 06:54:20 才启动。用 now-5min 当窗口，上一次运行
+                  # （06:46:51）就落到窗口外被 continue 掉，skip 恒为 False ——
+                  # 这就是「守卫加了却没拦住」的真正原因，与字段顺序无关。
+                  # 改成本次运行自己的 created_at，排队多久都不影响比较。
+                  anchor = None
+                  for r in runs:
+                      if str(r.get("id")) == current:
+                          anchor = datetime.fromisoformat(
+                              str(r.get("created_at", "")).replace("Z", "+00:00")
+                          )
+                          break
+                  cutoff = (anchor or datetime.now(timezone.utc)) - timedelta(minutes=5)
+
+                  for run in runs:
                       if str(run.get("id")) == current:
                           continue
                       if run.get("event") != "workflow_dispatch":

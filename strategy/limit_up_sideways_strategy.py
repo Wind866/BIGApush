@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from strategy.base_strategy import BaseStrategy
 from trading.technical_indicators import TechnicalIndicators
 

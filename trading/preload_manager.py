@@ -1,5 +1,5 @@
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import datetime
+from typing import List, Dict
 import logging
 
 from utils.strategy_name_mapper import get_chinese_name, get_english_name

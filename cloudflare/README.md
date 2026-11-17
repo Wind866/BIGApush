@@ -414,6 +414,8 @@ PAT 的到期时间；Worker 会在到期前 7 天起每天告警）、`build` �
   `Actions: Read and write`；`etf-feishu-push` 是**私有仓库**，PAT 的
   Repository access 必须包含它，否则 20:03 档期会一直 404；
   `astock-screener` 同样要勾选，否则新增的 20:33 档会 403。
-- 推送脚本都靠台账按档期判重，兜底 cron 可以多铺几档：重复触发会被秒级跳过，
-  不会刷屏；但 `etf-feishu-push` 用的是「同数据日期 + N 小时」时间窗口，
+- 推送脚本都靠台账按档期判重，兜底 cron 可以铺多档去重：重复触发会被秒级跳过，
+  不会刷屏；**但所有兜底档必须收敛在当天（UTC hour ≤ 15，即北京时间当日 23:59 前）**——
+  各 workflow 的「跨日守卫」会在任务拖到次日时判红告警、不补跑，铺到次日凌晨的 cron 已全部移除。
+  `etf-feishu-push` 用的是「同数据日期 + N 小时」时间窗口，
   加兜底档位前要先确认 `config.SKIP_WINDOW_HOURS` 覆盖得到，否则会重复推送。

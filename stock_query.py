@@ -148,7 +148,8 @@ def _color_icon(pct):
 
 
 def format_stock(index: int, code: str, result: dict, quote: dict,
-                 chips: dict | None = None, flow_hist: list | None = None) -> str:
+                 chips: dict | None = None, flow_hist: list | None = None,
+                 insights: dict | None = None) -> str:
     """把单只股票的分析结果排成若干行纯文本。"""
     if not result:
         return f"{index}. {code}  ❌ 分析失败（数据源全部不可用或代码不存在）"
@@ -252,6 +253,26 @@ def format_stock(index: int, code: str, result: dict, quote: dict,
     risks = [r for r in (advice.get("risks") or []) if r and "不构成" not in r and "未考虑突发" not in r]
     if risks:
         lines.append(f"   ❗ 风险：{_clip('；'.join(risks), 90)}")
+
+    # 决策仪表盘四块（与图片卡片同源，图片发失败退回文本时内容一致）
+    if insights:
+        lines.append("")
+        lines.append("   ── 重要信息速览 ──")
+        if insights.get("sentiment"):
+            lines.append(f"   • 舆情情绪：{insights['sentiment']}")
+        if insights.get("expectation"):
+            lines.append(f"   • 业绩预期：{insights['expectation']}")
+        if insights.get("risks"):
+            lines.append("   ── 风险警报 ──")
+            for i, r in enumerate(insights["risks"], 1):
+                lines.append(f"   • 风险点{i}：{r}")
+        if insights.get("catalysts"):
+            lines.append("   ── 利好催化 ──")
+            for i, c in enumerate(insights["catalysts"], 1):
+                lines.append(f"   • 利好{i}：{c}")
+        if insights.get("latest"):
+            lines.append("   ── 最新动态 ──")
+            lines.append(f"   • {insights['latest']}")
 
     return "\n".join(lines)
 
@@ -485,7 +506,8 @@ def write_summary(msg: str) -> None:
 
 def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: str,
                     chips: dict | None = None,
-                    flow_hist: list | None = None) -> dict:
+                    flow_hist: list | None = None,
+                    insights: dict | None = None) -> dict:
     """把分析结果摊平成 render_stock_card 的关键字参数（字段缺失一律给空值，别让渲染崩）。"""
     if not analysis:
         return {}
@@ -512,6 +534,7 @@ def build_card_spec(code: str, analysis: dict, quote: dict, hist, generated_at: 
         "hist": hist,
         "chips": chips or {},
         "flow_hist": flow_hist or [],
+        "insights": insights or {},
         "generated_at": generated_at,
     }
 
@@ -556,6 +579,9 @@ def main() -> int:
     )
     from utils.chip_analysis import compute_chip_distribution, float_shares_from_mv
     from utils.market_sources import sina_fetch_flow_history
+    # 决策仪表盘：个股新闻 + LLM 摘要（Cloudflare→DeepSeek→模板 三级降级）
+    from utils.stock_news import fetch_stock_news
+    from utils.llm_summary import summarize_insights
 
     quotes = fetch_quotes(codes)
     analyzer = StockAnalyzer()
@@ -631,10 +657,43 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001  资金流只是补充，失败不影响主结论
             print(f"::warning::{code} 资金流历史取不到：{type(exc).__name__} {exc}")
 
+        # 决策仪表盘四块文字：抓个股新闻 → 生成「舆情/预期/风险/利好/最新」。
+        # 全程容错：新闻失败传空、LLM 三通道全挂也会出模板文字，绝不影响主结论。
+        name = (analysis.get("stock_info") or {}).get("name") or code
+        news = fetch_stock_news(name, code)
+        technical = analysis.get("technical") or {}
+        ind = technical.get("indicators") or {}
+        f_fund = analysis.get("fundamental") or {}
+        f_val = f_fund.get("valuation") or {}
+        f_fin = f_fund.get("financial") or {}
+        f_growth = f_fund.get("growth") or {}
+        f_flow = (analysis.get("fund_flow") or {}).get("flow_analysis") or {}
+        flow_net = sum(r["net"] for r in flow_hist) / 1e8 if flow_hist else None
+        flow_up = sum(1 for r in flow_hist if r["net"] > 0) if flow_hist else None
+        advice = analysis.get("buy_advice") or {}
+        facts = {
+            "name": name, "code": code,
+            "industry": (analysis.get("stock_info") or {}).get("industry") or "",
+            "price": quote.get("price"), "pct": quote.get("pct"), "cap": quote.get("cap"),
+            "trend": technical.get("trend"),
+            "macd": ind.get("MACD"), "kdj": ind.get("KDJ"), "rsi": ind.get("RSI"),
+            "main_inflow": (f_flow.get("main_inflow") or 0) / 1e8 if f_flow.get("main_inflow") else 0,
+            "flow_20d": flow_net, "flow_up_days": flow_up,
+            "pe": f_val.get("pe"), "pe_level": f_val.get("pe_level"),
+            "pb": f_val.get("pb"), "pb_level": f_val.get("pb_level"),
+            "roe": f_fin.get("roe"), "debt_ratio": f_fin.get("debt_ratio"),
+            "profit_growth": f_growth.get("profit_growth"),
+            "chip_avg": chips.get("avg_cost"), "chip_profit": chips.get("profit_ratio"),
+            "chip_concentration": chips.get("concentration"),
+            "advice": f"{advice.get('action', '')} {advice.get('score', '')}".strip(),
+            "bull_count": advice.get("bull_count"), "bear_count": advice.get("bear_count"),
+        }
+        insights = summarize_insights(facts, news)
+
         block_index = len(blocks)
-        blocks.append(format_stock(idx, code, analysis, quote, chips, flow_hist))
+        blocks.append(format_stock(idx, code, analysis, quote, chips, flow_hist, insights))
         spec = build_card_spec(code, analysis, quote, hist, now.strftime("%Y-%m-%d %H:%M"),
-                               chips, flow_hist)
+                               chips, flow_hist, insights)
         if spec:
             pairs.append((block_index, spec))
         ok += 1

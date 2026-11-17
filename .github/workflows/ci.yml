@@ -55,6 +55,11 @@ jobs:
       - name: Worker 轮询去重回归（同一件事只做一次）
         run: node tests/test_worker_dedupe.mjs
 
+      # 补齐 Cache 之外的两层：D1 原子认领、GitHub 派发守卫。
+      # 仓库自带那条用例只覆盖 Cache，而线上失效的恰恰是 Cache。
+      - name: Worker 去重补充回归（D1 认领 / GitHub 守卫）
+        run: node tests/test_worker_dedupe_extra.mjs
+
       - name: 工作流配置解析
         run: |
           python - <<'PY'

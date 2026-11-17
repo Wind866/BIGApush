@@ -1,21 +1,31 @@
 # 选股策略说明书汇总
 
+> **关于「说明书文件」列**：`spec/` 目录自建库以来从未提交进本仓库，因此下表该列
+> 已改为纯文本（原先的 Markdown 链接在 GitHub 上必然 404）。说明书如需查阅，
+> 请向维护者索取，或补充到仓库后把该列恢复为链接。
+>
+> 另注：下表收录 12 个策略，而 `strategy/` 目录当前实际有 16 个策略类
+> （`GoldenCrossNotGreenStrategy`、`GoldenTriangleStrategy`、
+> `TrendResonanceReversalStrategy`、`TrendStartStrategy` 尚未登记在此表）。
+> 未登记在 `config/strategy_order.yaml` 的策略仍会执行，只是排序时排到末尾
+> （`strategy_registry.py` 用 `float('inf')` 兜底）。
+
 ## 策略目录
 
 | 序号 | 策略名称 | 策略类名 | 说明书文件 |
 |:---:|---------|---------|---------|
-| 1 | 仙人指路策略 | ImmortalGuidanceStrategy | [spec/仙人指路策略说明书.md](spec/仙人指路策略说明书.md) |
-| 2 | 2560战法选股策略 | Strategy2560Selection | [spec/2560战法选股策略说明书.md](spec/2560战法选股策略说明书.md) |
-| 3 | W底策略 | WBottomStrategy | [spec/W底策略说明书.md](spec/W底策略说明书.md) |
-| 4 | 多方炮策略 | MultiPartyCannonStrategy | [spec/多方炮策略说明书.md](spec/多方炮策略说明书.md) |
-| 5 | 底部趋势拐点策略 | BottomTrendInflectionStrategy | [spec/底部趋势拐点策略说明书.md](spec/底部趋势拐点策略说明书.md) |
-| 6 | 涨停回马枪策略 | LimitUpPullbackStrategy | [spec/涨停回马枪策略说明书.md](spec/涨停回马枪策略说明书.md) |
-| 7 | 涨停横盘策略 | LimitUpSidewaysStrategy | [spec/涨停横盘策略说明书.md](spec/涨停横盘策略说明书.md) |
-| 8 | 启明星策略 | MorningStarStrategy | [spec/启明星策略说明书.md](spec/启明星策略说明书.md) |
-| 9 | 多金叉共振策略 | MultiGoldenCrossStrategy | [spec/多金叉共振策略说明书.md](spec/多金叉共振策略说明书.md) |
-| 10 | 阻力位突破策略 | ResistanceBreakoutStrategy | [spec/阻力位突破策略说明书.md](spec/阻力位突破策略说明书.md) |
-| 11 | 强势洗盘弱转强策略 | StrongWashWeakToStrongStrategy | [spec/强势洗盘弱转强策略说明书.md](spec/强势洗盘弱转强策略说明书.md) |
-| 12 | 趋势加速拐点策略 | TrendAccelerationInflectionStrategy | [spec/趋势加速拐点策略说明书.md](spec/趋势加速拐点策略说明书.md) |
+| 1 | 仙人指路策略 | ImmortalGuidanceStrategy | `spec/仙人指路策略说明书.md` |
+| 2 | 2560战法选股策略 | Strategy2560Selection | `spec/2560战法选股策略说明书.md` |
+| 3 | W底策略 | WBottomStrategy | `spec/W底策略说明书.md` |
+| 4 | 多方炮策略 | MultiPartyCannonStrategy | `spec/多方炮策略说明书.md` |
+| 5 | 底部趋势拐点策略 | BottomTrendInflectionStrategy | `spec/底部趋势拐点策略说明书.md` |
+| 6 | 涨停回马枪策略 | LimitUpPullbackStrategy | `spec/涨停回马枪策略说明书.md` |
+| 7 | 涨停横盘策略 | LimitUpSidewaysStrategy | `spec/涨停横盘策略说明书.md` |
+| 8 | 启明星策略 | MorningStarStrategy | `spec/启明星策略说明书.md` |
+| 9 | 多金叉共振策略 | MultiGoldenCrossStrategy | `spec/多金叉共振策略说明书.md` |
+| 10 | 阻力位突破策略 | ResistanceBreakoutStrategy | `spec/阻力位突破策略说明书.md` |
+| 11 | 强势洗盘弱转强策略 | StrongWashWeakToStrongStrategy | `spec/强势洗盘弱转强策略说明书.md` |
+| 12 | 趋势加速拐点策略 | TrendAccelerationInflectionStrategy | `spec/趋势加速拐点策略说明书.md` |
 
 ## 策略分类汇总表
 

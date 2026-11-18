@@ -17,11 +17,12 @@ GitHub cron   延迟数小时 ─┘        ↑
                                       后到的那次读台账后秒级退出
 ```
 
-本 Worker **一个脚本管 4 个仓库、10 个档期**：
+本 Worker **一个脚本管 5 个仓库、11 个档期**：
 
 | 北京时间 | 目标 |
 | --- | --- |
 | 08:13 每天 | BIGApush / 早间新闻 |
+| 09:25 工作日 | morning-auction-selection / A股早盘竞价选股 |
 | 12:53 工作日 | BIGApush / 盘中选股 |
 | 18:53 工作日 | limit-up-relay / 收盘定稿 |
 | 19:33 工作日 | BIGApush / 收盘选股 |
@@ -122,7 +123,7 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=21:53&key=<TOKEN>  手
 > 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
 `/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
-当前这一版是 `"build": "2026-11-17.4"`，且响应里应有 `alertSignSupported: true`
+当前这一版是 `"build": "2026-11-18.1"`，且响应里应有 `alertSignSupported: true`
 （旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
 没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
 不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
@@ -135,7 +136,7 @@ curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | py
 
 | 字段 | 期望 | 不对时怎么办 |
 | --- | --- | --- |
-| `build` | `2026-11-17.4` | 线上不是这版 → 重新 deploy |
+| `build` | `2026-11-18.1` | 线上不是这版 → 重新 deploy |
 | `alertSignSupported` | `true` | 旧代码（本版新增字段） |
 | `dedupeBackend` | `d1` | `none` = 没绑 D1，去重只剩 Cache + 守卫两层 |
 | `tokenValid` | `true` | `GH_TOKEN` 过期或没勾四仓库 Actions 权限 |
@@ -379,7 +380,7 @@ curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里�
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-17.4，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-18.1，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 
@@ -433,10 +434,11 @@ PAT 的到期时间；Worker 会在到期前 7 天起每天告警）、`build` �
 - **`BIGApush` 是 fork**。GitHub 在 fork 上默认禁用 scheduled workflows，需要在
   该仓库 Actions 页面手动启用一次；迁移账号或重新 fork 后要重新确认，否则
   Worker 一旦失效就完全没有兜底。
-- 四个仓库的 `workflow_dispatch` 触发需要 PAT 具备对应仓库的
+- 五个仓库的 `workflow_dispatch` 触发需要 PAT 具备对应仓库的
   `Actions: Read and write`；`etf-feishu-push` 是**私有仓库**，PAT 的
   Repository access 必须包含它，否则 20:03 档期会一直 404；
-  `astock-screener` 同样要勾选，否则新增的 20:33 档会 403。
+  `astock-screener` 同样要勾选，否则 20:33 档会 403；
+  `morning-auction-selection` 必须勾选，否则 09:25 档会 403。
 - 推送脚本都靠台账按档期判重，兜底 cron 可以铺多档去重：重复触发会被秒级跳过，
   不会刷屏；**但所有兜底档必须收敛在当天（UTC hour ≤ 15，即北京时间当日 23:59 前）**——
   各 workflow 的「跨日守卫」会在任务拖到次日时判红告警、不补跑，铺到次日凌晨的 cron 已全部移除。

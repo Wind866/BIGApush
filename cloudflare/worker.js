@@ -10,7 +10,7 @@
  * 为什么用「一个每分钟 cron + 内部时间表」
  * ------------------------------------
  * Cloudflare Workers 免费版：**整个账号只有 5 个 Cron Trigger**（不是每个 Worker 5 个）。
- * 这里共 10 个档期（含对账、自检与 Keep Alive），逐个配 cron 装不下。改用单个 `* * * * *` 每分钟唤醒一次，
+ * 这里共 11 个档期（含对账、自检与 Keep Alive），逐个配 cron 装不下。改用单个 `* * * * *` 每分钟唤醒一次，
  * 在代码里换算成北京时间并查表命中，只占 1 个额度；每天 1440 次调用，
  * 远低于免费版 100,000 次/天。未命中的分钟不做任何网络请求。
  *
@@ -84,7 +84,11 @@ const API = "https://api.github.com";
 // 另外补上 D1 原子认领（可选，绑定 DB 才启用）：Cache 在 scheduled 上下文
 // 可能整个不可见，主键冲突才是跨实例的确定判据；未绑定时降级为前两层，
 // /health 与 /feishu/poll 都标 dedupeBackend=none，不静默。
-const BUILD = "2026-11-17.4";
+// 2026-11-18.1：新增 09:25「A股早盘竞价选股」准点派发，目标
+// morning-auction-selection/morning-auction.yml；通过 SLOT_INPUTS 显式传
+// force=false，避免绕过仓库侧台账判重。GH_TOKEN 需包含该仓库的
+// Actions: Read and write。档期数 10 → 11。
+const BUILD = "2026-11-18.1";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -92,6 +96,12 @@ const PLAN = [
   {
     at: "08:13", days: "all", name: "早间新闻",
     targets: ["BIGApush/morning-news.yml"],
+  },
+  {
+    // 2026-11-18 新增：早盘竞价选股准点派发。仓库侧 09:25 / 09:27 / 09:29
+    // 三档 cron 仅作兜底；台账按「交易日 + slot=0925」判重，force 必须保持 false。
+    at: "09:25", days: "weekday", name: "A股早盘竞价选股",
+    targets: ["morning-auction-selection/morning-auction.yml"],
   },
   {
     at: "12:53", days: "weekday", name: "盘中选股",
@@ -139,10 +149,13 @@ const PLAN = [
 // limit-up-relay/daily.yml 的中午 12:33 盘中档已于 2026-11-16 下线，只剩 18:53
 // 收盘定稿。仍然显式带 expect_hhmm：该 workflow 若拿不到档期号，只能按运行时刻
 // 猜档，Actions 排队一久就会把档期记错，台账随后把真正的定稿判成重复而跳过。
-// 这里按白名单给需要的工作流注入 inputs，其余工作流仍不传（API 会拒绝
-// 未在 workflow 里声明的 input）。
+// 这里按白名单给需要的工作流注入 inputs（档期号或 force 标记），其余工作流仍不传
+// （API 会拒绝未在 workflow 里声明的 input）。
 const SLOT_INPUTS = {
   "limit-up-relay/daily.yml": (slot) => ({ expect_hhmm: slot.at.replace(":", "") }),
+  // 显式 false：workflow_dispatch 若带上 force=true 会绕过台账判重，和 GitHub
+  // cron 兜底档叠加时可能重复推送。
+  "morning-auction-selection/morning-auction.yml": () => ({ force: false }),
 };
 
 const GH_HEADERS = (token) => ({
@@ -261,7 +274,7 @@ async function dispatchOne(env, headers, owner, branch, target, slot) {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
         // 默认不传 inputs：未在 workflow 里声明的 input 会被 API 拒绝。
-        // 只有 SLOT_INPUTS 白名单里的双档工作流才带档期号，其余用默认值。
+        // 只有 SLOT_INPUTS 白名单里的工作流才带 inputs（档期号或 force=false），其余用默认值。
         body: JSON.stringify(inputs ? { ref: branch, inputs } : { ref: branch }),
       });
       if (res.status === 204) {

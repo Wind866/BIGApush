@@ -123,7 +123,7 @@ https://gh-actions-scheduler.<子域>.workers.dev/test?at=21:53&key=<TOKEN>  手
 > 必须额外 `npx wrangler deploy` 或在 Dashboard 里点一次 Deploy，线上代码才会变。
 
 `/health` 会返回 `build` 字段，对照 `worker.js` 顶部的 `BUILD` 常量即可判断线上跑的是哪版。
-当前这一版是 `"build": "2026-11-18.1"`，且响应里应有 `alertSignSupported: true`
+当前这一版是 `"build": "2026-11-18.2"`，且响应里应有 `alertSignSupported: true`
 （旧版没有这个字段）。如果 build 仍是 `2026-11-14.x`、或字段缺失，说明**线上还是旧代码**：
 没重新部署、部署到了别的 Worker、或 Dashboard 里粘的是旧内容。曾经出现过线上与仓库
 不同步：线上没有 `/test` 路由、档期名也不一致，排查时极易误判成「Worker 挂了」。
@@ -136,7 +136,7 @@ curl -sS "https://gh-actions-scheduler.<子域>.workers.dev/health?check=1" | py
 
 | 字段 | 期望 | 不对时怎么办 |
 | --- | --- | --- |
-| `build` | `2026-11-18.1` | 线上不是这版 → 重新 deploy |
+| `build` | `2026-11-18.2` | 线上不是这版 → 重新 deploy |
 | `alertSignSupported` | `true` | 旧代码（本版新增字段） |
 | `dedupeBackend` | `d1` | `none` = 没绑 D1，去重只剩 Cache + 守卫两层 |
 | `tokenValid` | `true` | `GH_TOKEN` 过期或没勾四仓库 Actions 权限 |
@@ -380,7 +380,7 @@ curl https://<域名>/feishu/selftest?send=1   # 再多做一步：真往群里�
 `?send=1` 会真的发消息，专门用来一眼看出是「群发言权限（230035）」还是别的问题。
 
 ```bash
-curl https://<域名>/health            # build 字段应为 2026-11-18.1，确认线上跑的是这版
+curl https://<域名>/health            # build 字段应为 2026-11-18.2，确认线上跑的是这版
 curl https://<域名>/feishu/poll       # 立刻轮询一次，输出扫描报告
 ```
 

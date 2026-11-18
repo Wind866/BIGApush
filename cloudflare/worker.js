@@ -85,10 +85,12 @@ const API = "https://api.github.com";
 // 可能整个不可见，主键冲突才是跨实例的确定判据；未绑定时降级为前两层，
 // /health 与 /feishu/poll 都标 dedupeBackend=none，不静默。
 // 2026-11-18.1：新增 09:25「A股早盘竞价选股」准点派发，目标
-// morning-auction-selection/morning-auction.yml；通过 SLOT_INPUTS 显式传
-// force=false，避免绕过仓库侧台账判重。GH_TOKEN 需包含该仓库的
+// morning-auction-selection/morning-auction.yml；GH_TOKEN 需包含该仓库的
 // Actions: Read and write。档期数 10 → 11。
-const BUILD = "2026-11-18.1";
+// 2026-11-18.2：该 workflow 的 force 是 boolean 输入，REST dispatch 的 inputs
+// 值按规范应为字符串；不再显式传 force，改由 workflow 默认值 false 生效，
+// 同时仍受仓库侧台账判重保护。
+const BUILD = "2026-11-18.2";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -149,13 +151,12 @@ const PLAN = [
 // limit-up-relay/daily.yml 的中午 12:33 盘中档已于 2026-11-16 下线，只剩 18:53
 // 收盘定稿。仍然显式带 expect_hhmm：该 workflow 若拿不到档期号，只能按运行时刻
 // 猜档，Actions 排队一久就会把档期记错，台账随后把真正的定稿判成重复而跳过。
-// 这里按白名单给需要的工作流注入 inputs（档期号或 force 标记），其余工作流仍不传
+// 这里按白名单给需要的工作流注入 inputs（仅档期号），其余工作流仍不传
 // （API 会拒绝未在 workflow 里声明的 input）。
 const SLOT_INPUTS = {
   "limit-up-relay/daily.yml": (slot) => ({ expect_hhmm: slot.at.replace(":", "") }),
-  // 显式 false：workflow_dispatch 若带上 force=true 会绕过台账判重，和 GitHub
-  // cron 兜底档叠加时可能重复推送。
-  "morning-auction-selection/morning-auction.yml": () => ({ force: false }),
+  // morning-auction-selection 不在此列：其 force 为 boolean 输入，REST inputs
+  // 值应为字符串；省略 inputs 时使用 workflow 默认值 false，台账判重仍生效。
 };
 
 const GH_HEADERS = (token) => ({
@@ -274,7 +275,7 @@ async function dispatchOne(env, headers, owner, branch, target, slot) {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
         // 默认不传 inputs：未在 workflow 里声明的 input 会被 API 拒绝。
-        // 只有 SLOT_INPUTS 白名单里的工作流才带 inputs（档期号或 force=false），其余用默认值。
+        // 只有 SLOT_INPUTS 白名单里的工作流才带 inputs（仅档期号），其余用 workflow 默认值。
         body: JSON.stringify(inputs ? { ref: branch, inputs } : { ref: branch }),
       });
       if (res.status === 204) {

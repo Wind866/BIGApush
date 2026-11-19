@@ -10,7 +10,7 @@
  * 为什么用「一个每分钟 cron + 内部时间表」
  * ------------------------------------
  * Cloudflare Workers 免费版：**整个账号只有 5 个 Cron Trigger**（不是每个 Worker 5 个）。
- * 这里共 11 个档期（含对账、自检与 Keep Alive），逐个配 cron 装不下。改用单个 `* * * * *` 每分钟唤醒一次，
+ * 这里共 10 个档期（含对账、自检与 Keep Alive），逐个配 cron 装不下。改用单个 `* * * * *` 每分钟唤醒一次，
  * 在代码里换算成北京时间并查表命中，只占 1 个额度；每天 1440 次调用，
  * 远低于免费版 100,000 次/天。未命中的分钟不做任何网络请求。
  *
@@ -90,7 +90,9 @@ const API = "https://api.github.com";
 // 2026-11-18.2：该 workflow 的 force 是 boolean 输入，REST dispatch 的 inputs
 // 值按规范应为字符串；不再显式传 force，改由 workflow 默认值 false 生效，
 // 同时仍受仓库侧台账判重保护。
-const BUILD = "2026-11-18.2";
+// 2026-11-19.1：移除 09:25「A股早盘竞价选股」档期 —— morning-auction-selection
+// 仓库已删除，继续派发只会拿到 404 并触发失败告警。档期数 11 → 10。
+const BUILD = "2026-11-19.1";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -98,12 +100,6 @@ const PLAN = [
   {
     at: "08:13", days: "all", name: "早间新闻",
     targets: ["BIGApush/morning-news.yml"],
-  },
-  {
-    // 2026-11-18 新增：早盘竞价选股准点派发。仓库侧 09:25 / 09:27 / 09:29
-    // 三档 cron 仅作兜底；台账按「交易日 + slot=0925」判重，force 必须保持 false。
-    at: "09:25", days: "weekday", name: "A股早盘竞价选股",
-    targets: ["morning-auction-selection/morning-auction.yml"],
   },
   {
     at: "12:53", days: "weekday", name: "盘中选股",
@@ -155,8 +151,6 @@ const PLAN = [
 // （API 会拒绝未在 workflow 里声明的 input）。
 const SLOT_INPUTS = {
   "limit-up-relay/daily.yml": (slot) => ({ expect_hhmm: slot.at.replace(":", "") }),
-  // morning-auction-selection 不在此列：其 force 为 boolean 输入，REST inputs
-  // 值应为字符串；省略 inputs 时使用 workflow 默认值 false，台账判重仍生效。
 };
 
 const GH_HEADERS = (token) => ({

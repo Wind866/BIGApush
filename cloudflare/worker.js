@@ -92,7 +92,10 @@ const API = "https://api.github.com";
 // 同时仍受仓库侧台账判重保护。
 // 2026-11-19.1：移除 09:25「A股早盘竞价选股」档期 —— morning-auction-selection
 // 仓库已删除，继续派发只会拿到 404 并触发失败告警。档期数 11 → 10。
-const BUILD = "2026-11-19.1";
+// 2026-11-22.1：新增 19:16「游资动向日报」档期，目标 youzi-radar/youzi-daily.yml。
+// 该仓库是私有仓库，GH_TOKEN 的 Repository access 必须勾上 youzi-radar，否则本档 404。
+// 它自己按数据日期记台账判重，与仓库 cron 兜底并行也不会重复推送。档期数 10 → 11。
+const BUILD = "2026-11-22.1";
 
 // 档期表。at 是北京时间 HH:MM；days: all / weekday / 1(Mon) / 2(Tue)
 // weekday 只避开周末，A 股节假日由各脚本自己的交易日探测跳过。
@@ -108,6 +111,14 @@ const PLAN = [
   {
     at: "18:53", days: "weekday", name: "涨停接力 · 收盘定稿",
     targets: ["limit-up-relay/daily.yml"],
+  },
+  {
+    // 2026-11-22 新增：A股游资动向日报（龙虎榜席位还原成知名游资身份）。
+    // 定在 19:16 而不是收盘后立刻跑：龙虎榜一般 17:30-18:00 才披露完，
+    // 太早取到的是残缺数据。该仓库自己按「数据日期」记台账判重，
+    // 与本档期并行的 GitHub cron 兜底不会重复推送。
+    at: "19:16", days: "weekday", name: "游资动向日报",
+    targets: ["youzi-radar/youzi-daily.yml"],
   },
   {
     at: "19:33", days: "weekday", name: "收盘选股",

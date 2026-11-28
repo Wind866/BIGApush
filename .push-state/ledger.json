@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-11-27T21:54:12+08:00",
+  "updated_at": "2026-11-28T08:14:10+08:00",
   "records": [
     {
       "workflow": "evening-news.yml",
@@ -295,6 +295,12 @@
       "edition": "2026-11-27",
       "run_id": "46011051924",
       "ts": "2026-11-27 21:54:12"
+    },
+    {
+      "workflow": "morning-news.yml",
+      "edition": "2026-11-28",
+      "run_id": "46086754210",
+      "ts": "2026-11-28 08:14:09"
     }
   ]
 }
